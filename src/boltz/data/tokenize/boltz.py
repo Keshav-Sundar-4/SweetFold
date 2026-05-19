@@ -49,6 +49,16 @@ class BoltzTokenizer(Tokenizer):
         # Get structure data
         struct = data.structure
 
+        # Identify glycosylated residues for special handling
+        glycosylated_residues = set()
+        if struct.glycosylation_sites is not None and struct.glycosylation_sites.size > 0:
+            # Use np.atleast_1d to handle the case of a single site loaded as a 0-d array
+            for site in np.atleast_1d(struct.glycosylation_sites):
+                # FIX: Handle case where serialization loaded a None scalar into the array
+                if site is None:
+                    continue
+                glycosylated_residues.add((site["protein_chain_id"], site["protein_res_id"]))
+
         # Create token data
         token_data = []
 
@@ -69,8 +79,10 @@ class BoltzTokenizer(Tokenizer):
                 atom_start = res["atom_idx"]
                 atom_end = res["atom_idx"] + res["atom_num"]
 
-                # Standard residues are tokens
-                if res["is_standard"]:
+                is_glycosylated_res = (chain["asym_id"], res["res_idx"]) in glycosylated_residues
+
+                # Standard residues (if not glycosylated) are single tokens
+                if res["is_standard"] and not is_glycosylated_res:
                     # Get center and disto atoms
                     center = struct.atoms[res["atom_center"]]
                     disto = struct.atoms[res["atom_disto"]]
@@ -105,16 +117,14 @@ class BoltzTokenizer(Tokenizer):
                     token_data.append(astuple(token))
 
                     # Update atom_idx to token_idx
-                    for atom_idx in range(atom_start, atom_end):
-                        atom_to_token[atom_idx] = token_idx
+                    for atom_idx_loop in range(atom_start, atom_end):
+                        atom_to_token[atom_idx_loop] = token_idx
 
                     token_idx += 1
 
-                # Non-standard are tokenized per atom
+                # Non-standard OR glycosylated residues are tokenized per atom
                 else:
-                    # We use the unk protein token as res_type
-                    unk_token = const.unk_token["PROTEIN"]
-                    unk_id = const.token_ids[unk_token]
+                    res_type_for_atom_tokens = const.token_ids[const.unk_token["PROTEIN"]]
 
                     # Get atom coordinates
                     atom_data = struct.atoms[atom_start:atom_end]
@@ -122,7 +132,6 @@ class BoltzTokenizer(Tokenizer):
 
                     # Tokenize each atom
                     for i, atom in enumerate(atom_data):
-                        # Token is present if atom is
                         is_present = res["is_present"] & atom["is_present"]
                         index = atom_start + i
 
@@ -132,20 +141,18 @@ class BoltzTokenizer(Tokenizer):
                             atom_idx=index,
                             atom_num=1,
                             res_idx=res["res_idx"],
-                            res_type=unk_id,
+                            res_type=res_type_for_atom_tokens,
                             sym_id=chain["sym_id"],
                             asym_id=chain["asym_id"],
                             entity_id=chain["entity_id"],
-                            mol_type=chain["mol_type"],
+                            mol_type=const.chain_type_ids["PROTEIN"] if is_glycosylated_res else chain["mol_type"],
                             center_idx=index,
                             disto_idx=index,
                             center_coords=atom_coords[i],
                             disto_coords=atom_coords[i],
                             resolved_mask=is_present,
                             disto_mask=is_present,
-                            cyclic_period=chain[
-                                "cyclic_period"
-                            ],  # Enforced to be False in chain parser
+                            cyclic_period=chain["cyclic_period"],
                         )
                         token_data.append(astuple(token))
 
@@ -156,20 +163,21 @@ class BoltzTokenizer(Tokenizer):
         # Create token bonds
         token_bonds = []
 
-        # Add atom-atom bonds from ligands
+        # Add atom-atom bonds from ligands AND INTRA-RESIDUE BONDS
         for bond in struct.bonds:
             if (
                 bond["atom_1"] not in atom_to_token
                 or bond["atom_2"] not in atom_to_token
             ):
                 continue
-            token_bond = (
-                atom_to_token[bond["atom_1"]],
-                atom_to_token[bond["atom_2"]],
-            )
-            token_bonds.append(token_bond)
+            token_1_idx = atom_to_token[bond["atom_1"]]
+            token_2_idx = atom_to_token[bond["atom_2"]]
 
-        # Add connection bonds (covalent)
+            if token_1_idx != token_2_idx:
+                token_bond = (token_1_idx, token_2_idx)
+                token_bonds.append(token_bond)
+
+        # Add connection bonds (covalent inter-chain/inter-residue)
         for conn in struct.connections:
             if (
                 conn["atom_1"] not in atom_to_token
@@ -182,11 +190,12 @@ class BoltzTokenizer(Tokenizer):
             )
             token_bonds.append(token_bond)
 
-        token_data = np.array(token_data, dtype=Token)
-        token_bonds = np.array(token_bonds, dtype=TokenBond)
+        token_data_np = np.array(token_data, dtype=Token)
+        token_bonds_np = np.array(list(set(token_bonds)), dtype=TokenBond)
+        
         tokenized = Tokenized(
-            token_data,
-            token_bonds,
+            token_data_np,
+            token_bonds_np,
             data.structure,
             data.msa,
             data.residue_constraints,
