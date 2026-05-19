@@ -20,7 +20,6 @@ from boltz.model.layers.triangular_mult import (
 )
 from boltz.model.modules.encoders import AtomAttentionEncoder
 
-
 class InputEmbedder(nn.Module):
     """Input embedder."""
 
@@ -111,8 +110,7 @@ class InputEmbedder(nn.Module):
             a, _, _, _, _ = self.atom_attention_encoder(feats)
         s = torch.cat([a, res_type, profile, deletion_mean, pocket_feature], dim=-1)
         return s
-
-
+            
 class MSAModule(nn.Module):
     """MSA module."""
 
