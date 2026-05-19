@@ -361,6 +361,68 @@ max_paired_seqs = 8192
 chunk_size_threshold = 384
 
 ####################################################################################################
+# GLYCAN MAPPINGS (IDENTICAL & ANOMERS)
+####################################################################################################
+
+# Maps identical sugars to a single de facto base sugar.
+IDENTICAL_MAP = {
+    "Z9E": "7K3",
+    "RV7": "AGL",
+    "ASO": "AH2",
+    "NHF": "AH2",
+    "SOR": "GLO",
+    "Z4Y": "TWG",
+    "YIO": "TWJ",
+    "XYL": "XLS"
+}
+
+# Maps a base sugar and its configuration to the exact CCD code.
+ANOMER_MAP = {
+    "0NZ": {"a": "D6G", "b": "0NZ"}, "D6G": {"a": "D6G", "b": "0NZ"},
+    "1GN": {"a": "X6X", "b": "1GN"}, "X6X": {"a": "X6X", "b": "1GN"},
+    "2FG": {"a": "GAF", "b": "2FG"}, "GAF": {"a": "GAF", "b": "2FG"},
+    "3MK": {"a": "Z6H", "b": "3MK"}, "Z6H": {"a": "Z6H", "b": "3MK"},
+    "4GL": {"a": "4GL", "b": "GL0"}, "GL0": {"a": "4GL", "b": "GL0"},
+    "4N2": {"a": "Z0F", "b": "4N2"}, "Z0F": {"a": "Z0F", "b": "4N2"},
+    "4SG": {"a": "4SG", "b": "SGC"}, "SGC": {"a": "4SG", "b": "SGC"},
+    "9WJ": {"a": "MRH", "b": "9WJ"}, "MRH": {"a": "MRH", "b": "9WJ"},
+    "A2G": {"a": "A2G", "b": "NGA"}, "NGA": {"a": "A2G", "b": "NGA"},
+    "ADA": {"a": "ADA", "b": "GTR"}, "GTR": {"a": "ADA", "b": "GTR"},
+    "AFD": {"a": "AFD", "b": "ALL"}, "ALL": {"a": "AFD", "b": "ALL"},
+    "AGL": {"a": "AGL", "b": "DAG"}, "DAG": {"a": "AGL", "b": "DAG"},
+    "RR7": {"a": "Z61", "b": "RR7"}, "Z61": {"a": "Z61", "b": "RR7"},
+    "ARA": {"a": "ARB", "b": "ARA"}, "ARB": {"a": "ARB", "b": "ARA"},
+    "BDP": {"a": "GCU", "b": "BDP"}, "GCU": {"a": "GCU", "b": "BDP"},
+    "BEM": {"a": "MAV", "b": "BEM"}, "MAV": {"a": "MAV", "b": "BEM"},
+    "BG6": {"a": "G6P", "b": "BG6"}, "G6P": {"a": "G6P", "b": "BG6"},
+    "BGC": {"a": "GLC", "b": "BGC"}, "GLC": {"a": "GLC", "b": "BGC"},
+    "BMA": {"a": "MAN", "b": "BMA"}, "MAN": {"a": "MAN", "b": "BMA"},
+    "FCA": {"a": "FCA", "b": "FCB"}, "FCB": {"a": "FCA", "b": "FCB"},
+    "FUC": {"a": "FUC", "b": "FUL"}, "FUL": {"a": "FUC", "b": "FUL"},
+    "G2F": {"a": "G2F", "b": "SHG"}, "SHG": {"a": "G2F", "b": "SHG"},
+    "G3F": {"a": "TUP", "b": "G3F"}, "TUP": {"a": "TUP", "b": "G3F"},
+    "G4D": {"a": "G4D", "b": "Z9D"}, "Z9D": {"a": "G4D", "b": "Z9D"},
+    "G6D": {"a": "G6D", "b": "YYK"}, "YYK": {"a": "G6D", "b": "YYK"},
+    "GAL": {"a": "GLA", "b": "GAL"}, "GLA": {"a": "GLA", "b": "GAL"},
+    "GCS": {"a": "PA1", "b": "GCS"}, "PA1": {"a": "PA1", "b": "GCS"},
+    "GCV": {"a": "GCV", "b": "GCW"}, "GCW": {"a": "GCV", "b": "GCW"},
+    "GIV": {"a": "GXL", "b": "GIV"}, "GXL": {"a": "GXL", "b": "GIV"},
+    "GUF": {"a": "GUZ", "b": "GUF"}, "GUZ": {"a": "GUZ", "b": "GUF"},
+    "GUP": {"a": "GUP", "b": "Z8H"}, "Z8H": {"a": "GUP", "b": "Z8H"},
+    "HSY": {"a": "HSY", "b": "LXC"}, "LXC": {"a": "HSY", "b": "LXC"},
+    "MAF": {"a": "MAF", "b": "MBF"}, "MBF": {"a": "MAF", "b": "MBF"},
+    "MG5": {"a": "SG5", "b": "MG5"}, "SG5": {"a": "SG5", "b": "MG5"},
+    "MXY": {"a": "MXZ", "b": "MXY"}, "MXZ": {"a": "MXZ", "b": "MXY"},
+    "NAG": {"a": "NDG", "b": "NAG"}, "NDG": {"a": "NDG", "b": "NAG"},
+    "RAE": {"a": "RAE", "b": "Z5J"}, "Z5J": {"a": "RAE", "b": "Z5J"},
+    "RAM": {"a": "RAM", "b": "RM4"}, "RM4": {"a": "RAM", "b": "RM4"},
+    "TWY": {"a": "TXB", "b": "TWY"}, "TXB": {"a": "TXB", "b": "TWY"},
+    "WOO": {"a": "Z2D", "b": "WOO"}, "Z2D": {"a": "Z2D", "b": "WOO"},
+    "X0X": {"a": "X1X", "b": "X0X"}, "X1X": {"a": "X1X", "b": "X0X"},
+    "XYP": {"a": "XYS", "b": "XYP"}, "XYS": {"a": "XYS", "b": "XYP"}
+}
+
+####################################################################################################
 # VDW_RADII
 ####################################################################################################
 
