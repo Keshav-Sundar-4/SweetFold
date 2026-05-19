@@ -1,7 +1,7 @@
 # started from code from https://github.com/lucidrains/alphafold3-pytorch, MIT License, Copyright (c) 2024 Phil Wang
 
 from __future__ import annotations
-
+import sys
 from math import sqrt
 
 import torch
@@ -15,6 +15,9 @@ from boltz.data import const
 from boltz.model.loss.diffusion import (
     smooth_lddt_loss,
     weighted_rigid_align,
+    Linkage_Loss,
+    Glyco_AA_MSE_Loss,
+    Glycan_Dihedral_Loss,
 )
 from boltz.model.modules.encoders import (
     AtomAttentionDecoder,
@@ -30,6 +33,7 @@ from boltz.model.modules.transformers import (
 from boltz.model.modules.utils import (
     LinearNoBias,
     compute_random_augmentation,
+    center_random_augmentation,
     default,
     log,
 )
@@ -751,31 +755,26 @@ class AtomDiffusion(Module):
         multiplicity=1,
     ):
         denoised_atom_coords = out_dict["denoised_atom_coords"]
-        noised_atom_coords = out_dict["noised_atom_coords"]
-        sigmas = out_dict["sigmas"]
+        noised_atom_coords   = out_dict["noised_atom_coords"]
+        sigmas               = out_dict["sigmas"]
 
-        resolved_atom_mask = feats["atom_resolved_mask"]
-        resolved_atom_mask = resolved_atom_mask.repeat_interleave(multiplicity, 0)
+        resolved_atom_mask = feats["atom_resolved_mask"].repeat_interleave(multiplicity, 0)
 
         align_weights = noised_atom_coords.new_ones(noised_atom_coords.shape[:2])
         atom_type = (
             torch.bmm(
                 feats["atom_to_token"].float(), feats["mol_type"].unsqueeze(-1).float()
-            )
-            .squeeze(-1)
-            .long()
+            ).squeeze(-1).long()
         )
         atom_type_mult = atom_type.repeat_interleave(multiplicity, 0)
 
         align_weights = align_weights * (
             1
-            + nucleotide_loss_weight
-            * (
-                torch.eq(atom_type_mult, const.chain_type_ids["DNA"]).float()
-                + torch.eq(atom_type_mult, const.chain_type_ids["RNA"]).float()
+            + nucleotide_loss_weight * (
+                (atom_type_mult == const.chain_type_ids["DNA"]).float()
+                + (atom_type_mult == const.chain_type_ids["RNA"]).float()
             )
-            + ligand_loss_weight
-            * torch.eq(atom_type_mult, const.chain_type_ids["NONPOLYMER"]).float()
+            + ligand_loss_weight * (atom_type_mult == const.chain_type_ids["NONPOLYMER"]).float()
         )
 
         with torch.no_grad(), torch.autocast("cuda", enabled=False):
@@ -787,42 +786,88 @@ class AtomDiffusion(Module):
                 mask=resolved_atom_mask.detach().float(),
             )
 
-        # Cast back
-        atom_coords_aligned_ground_truth = atom_coords_aligned_ground_truth.to(
-            denoised_atom_coords
-        )
+        atom_coords_aligned_ground_truth = atom_coords_aligned_ground_truth.to(denoised_atom_coords)
+        
+        # --- Main positional MSE, per-sample sigma weighting ---
+        mse_loss_per_sample = ((denoised_atom_coords - atom_coords_aligned_ground_truth) ** 2).sum(dim=-1)
+        mse_loss_per_sample = torch.sum(
+            mse_loss_per_sample * align_weights * resolved_atom_mask, dim=-1
+        ) / torch.sum(3 * align_weights * resolved_atom_mask, dim=-1).clamp(min=1e-8)
 
-        # weighted MSE loss of denoised atom positions
-        mse_loss = ((denoised_atom_coords - atom_coords_aligned_ground_truth) ** 2).sum(
-            dim=-1
-        )
-        mse_loss = torch.sum(
-            mse_loss * align_weights * resolved_atom_mask, dim=-1
-        ) / torch.sum(3 * align_weights * resolved_atom_mask, dim=-1)
-
-        # weight by sigma factor
         loss_weights = self.loss_weight(sigmas)
-        mse_loss = (mse_loss * loss_weights).mean()
+        mse_loss     = (mse_loss_per_sample * loss_weights).mean()
 
-        total_loss = mse_loss
-
-        # proposed auxiliary smooth lddt loss
+        # --- Smooth lDDT ---
         lddt_loss = self.zero
         if add_smooth_lddt_loss:
             lddt_loss = smooth_lddt_loss(
                 denoised_atom_coords,
                 feats["coords"],
-                torch.eq(atom_type, const.chain_type_ids["DNA"]).float()
-                + torch.eq(atom_type, const.chain_type_ids["RNA"]).float(),
+                ((atom_type == const.chain_type_ids["DNA"]).float()
+                    + (atom_type == const.chain_type_ids["RNA"]).float()),
                 coords_mask=feats["atom_resolved_mask"],
                 multiplicity=multiplicity,
             )
 
-            total_loss = total_loss + lddt_loss
+        # --- Glycosidic Linkage Distance Loss (Inter-residue bond length) ---
+        linkage_loss = Linkage_Loss(
+            feats=feats,
+            pred_coords=denoised_atom_coords,
+            true_coords=feats["coords"],
+            loss_weights=loss_weights,
+            multiplicity=multiplicity,
+            device=denoised_atom_coords.device,
+        )
 
+        # --- Glycosylated Amino Acid Geometric MSE (Corrects Warping) ---
+        glyco_aa_mse_loss = Glyco_AA_MSE_Loss(
+            feats=feats,
+            pred_coords=denoised_atom_coords,
+            true_coords=feats["coords"],
+            loss_weights=loss_weights,
+            multiplicity=multiplicity,
+            device=denoised_atom_coords.device,
+        )
+
+        # --- Glycan Dihedrals Loss (Prevents Distortion) ---
+        glycan_dihedral_loss = Glycan_Dihedral_Loss(
+            feats=feats,
+            pred_coords=denoised_atom_coords,
+            true_coords=feats["coords"],
+            loss_weights=loss_weights,
+            multiplicity=multiplicity,
+        )
+
+        # 1. Substitute `None` with a zero tensor for the `total_loss` calculation to fix DDP.
+        linkage_loss_for_total  = linkage_loss if linkage_loss is not None else self.zero
+        glyco_aa_loss_for_total = glyco_aa_mse_loss if glyco_aa_mse_loss is not None else self.zero
+        dihedral_loss_for_total = glycan_dihedral_loss if glycan_dihedral_loss is not None else self.zero
+
+        # 2. Assemble the total loss.
+        total_loss = mse_loss + lddt_loss + linkage_loss_for_total + glyco_aa_loss_for_total + dihedral_loss_for_total
+
+        # 3. Keep the original variables (which can be `None`) in the breakdown dictionary.
         loss_breakdown = dict(
             mse_loss=mse_loss,
             smooth_lddt_loss=lddt_loss,
+            linkage_loss=linkage_loss, 
+            glyco_aa_mse_loss=glyco_aa_mse_loss, 
+            glycan_dihedral_loss=glycan_dihedral_loss,
+        )
+
+        # 4. Modify the print statement to handle the `None` case securely with 'N/A'
+        linkage_loss_for_print  = f"{linkage_loss.item():<12.6f}" if linkage_loss is not None else "N/A"
+        glyco_aa_loss_for_print = f"{glyco_aa_mse_loss.item():<12.6f}" if glyco_aa_mse_loss is not None else "N/A"
+        dihedral_loss_for_print = f"{glycan_dihedral_loss.item():<12.6f}" if glycan_dihedral_loss is not None else "N/A"
+
+        print(
+            f"Loss Breakdown: \n"
+            f"SmoothLDDT:       {lddt_loss.item():<12.6f}\n"
+            f"MSE:              {mse_loss.item():<12.6f}\n"
+            f"Linkage Loss:     {linkage_loss_for_print}\n"
+            f"Glyco AA MSE:     {glyco_aa_loss_for_print}\n"
+            f"Dihedral Loss:    {dihedral_loss_for_print}\n\n",
+            flush=True,
         )
 
         return dict(loss=total_loss, loss_breakdown=loss_breakdown)
