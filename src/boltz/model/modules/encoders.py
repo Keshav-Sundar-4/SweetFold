@@ -13,6 +13,7 @@ import boltz.model.layers.initialize as init
 from boltz.model.layers.transition import Transition
 from boltz.model.modules.transformers import AtomTransformer
 from boltz.model.modules.utils import LinearNoBias
+import sys
 
 
 class FourierEmbedding(Module):
@@ -42,29 +43,18 @@ class FourierEmbedding(Module):
         rand_proj = self.proj(times)
         return torch.cos(2 * pi * rand_proj)
 
-
 class RelativePositionEncoder(Module):
     """Relative position encoder."""
 
     def __init__(self, token_z, r_max=32, s_max=2):
-        """Initialize the relative position encoder.
-
-        Parameters
-        ----------
-        token_z : int
-            The pair representation dimension.
-        r_max : int, optional
-            The maximum index distance, by default 32.
-        s_max : int, optional
-            The maximum chain distance, by default 2.
-
-        """
+        """Initialize the relative position encoder."""
         super().__init__()
         self.r_max = r_max
         self.s_max = s_max
         self.linear_layer = LinearNoBias(4 * (r_max + 1) + 2 * (s_max + 1) + 1, token_z)
 
     def forward(self, feats):
+        # --- Standard RelPos Logic ---
         b_same_chain = torch.eq(
             feats["asym_id"][:, :, None], feats["asym_id"][:, None, :]
         )
@@ -77,6 +67,7 @@ class RelativePositionEncoder(Module):
         rel_pos = (
             feats["residue_index"][:, :, None] - feats["residue_index"][:, None, :]
         )
+        
         if torch.any(feats["cyclic_period"] != 0):
             period = torch.where(
                 feats["cyclic_period"] > 0,
@@ -85,12 +76,9 @@ class RelativePositionEncoder(Module):
             )
             rel_pos = (rel_pos - period * torch.round(rel_pos / period)).long()
 
-        d_residue = torch.clip(
-            rel_pos + self.r_max,
-            0,
-            2 * self.r_max,
-        )
+        d_residue = torch.clip(rel_pos + self.r_max, 0, 2 * self.r_max)
 
+        # Standard masking: If different chains, set to "Far" bin
         d_residue = torch.where(
             b_same_chain, d_residue, torch.zeros_like(d_residue) + 2 * self.r_max + 1
         )
@@ -120,6 +108,7 @@ class RelativePositionEncoder(Module):
         )
         a_rel_chain = one_hot(d_chain, 2 * self.s_max + 2)
 
+        # Calculate the full bias matrix `p` normally first
         p = self.linear_layer(
             torch.cat(
                 [
@@ -131,8 +120,22 @@ class RelativePositionEncoder(Module):
                 dim=-1,
             )
         )
-        return p
 
+        # --- GLYCAN SPECIFIC MASKING ---
+        # 1. Identify Glycan Tokens (which in your case, are Glycan Atoms)
+        is_mono_feat = feats.get("is_monosaccharide", torch.zeros_like(feats["asym_id"]).unsqueeze(-1))
+        is_glycan = is_mono_feat.squeeze(-1) > 0.5 
+
+        # 2. Identify pairs where BOTH are Glycans
+        pair_is_both_glycan = is_glycan[:, :, None] & is_glycan[:, None, :]
+
+        # 3. The Mask: True if we should suppress the bias
+        suppress_mask = pair_is_both_glycan
+
+        # 4. Apply Mask: Zero out the bias `p` for ALL glycan-glycan interactions.
+        p = torch.where(suppress_mask.unsqueeze(-1), torch.zeros_like(p), p)
+
+        return p
 
 class SingleConditioning(Module):
     """Single conditioning layer."""
@@ -284,7 +287,6 @@ def single_to_keys(single, indexing_matrix, W, H):
     return torch.einsum("b j i d, j k -> b k i d", single, indexing_matrix).reshape(
         B, K, H, D
     )
-
 
 class AtomAttentionEncoder(Module):
     """Atom attention encoder."""
@@ -540,7 +542,6 @@ class AtomAttentionEncoder(Module):
 
         return a, q, c, p, to_keys
 
-
 class AtomAttentionDecoder(Module):
     """Atom attention decoder."""
 
@@ -555,28 +556,6 @@ class AtomAttentionDecoder(Module):
         atom_decoder_heads=4,
         activation_checkpointing=False,
     ):
-        """Initialize the atom attention decoder.
-
-        Parameters
-        ----------
-        atom_s : int
-            The atom single representation dimension.
-        atom_z : int
-            The atom pair representation dimension.
-        token_s : int
-            The single representation dimension.
-        attn_window_queries : int
-            The number of atoms per window for queries.
-        attn_window_keys : int
-            The number of atoms per window for keys.
-        atom_decoder_depth : int, optional
-            The number of transformer layers, by default 3.
-        atom_decoder_heads : int, optional
-            The number of transformer heads, by default 4.
-        activation_checkpointing : bool, optional
-            Whether to use activation checkpointing, by default False.
-
-        """
         super().__init__()
 
         self.a_to_q_trans = LinearNoBias(2 * token_s, atom_s)
