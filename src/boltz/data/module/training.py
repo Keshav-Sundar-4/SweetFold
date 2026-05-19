@@ -82,39 +82,53 @@ class Dataset:
 
 
 def load_input(record: Record, target_dir: Path, msa_dir: Path) -> Input:
-    """Load the given input data.
+    """Load the given input data, including glycan features if present."""
+    # Load the structure data, allowing for pickled glycan map objects
+    npz_path = target_dir / "structures" / f"{record.id}.npz"
+    structure_data = np.load(npz_path, allow_pickle=True)
 
-    Parameters
-    ----------
-    record : Record
-        The record to load.
-    target_dir : Path
-        The path to the data directory.
-    msa_dir : Path
-        The path to msa directory.
-
-    Returns
-    -------
-    Input
-        The loaded input.
-
-    """
-    # Load the structure
-    structure = np.load(target_dir / "structures" / f"{record.id}.npz")
-    structure = Structure(
-        atoms=structure["atoms"],
-        bonds=structure["bonds"],
-        residues=structure["residues"],
-        chains=structure["chains"],
-        connections=structure["connections"].astype(Connection),
-        interfaces=structure["interfaces"],
-        mask=structure["mask"],
+    # Extract glycan maps if they exist. They are stored as 0-d arrays of objects.
+    glycan_feature_map_raw = structure_data.get("glycan_feature_map", None)
+    glycan_feature_map = (
+        glycan_feature_map_raw.item()
+        if glycan_feature_map_raw is not None and glycan_feature_map_raw.shape == ()
+        else None
     )
 
+    atom_to_mono_idx_map_raw = structure_data.get("atom_to_mono_idx_map", None)
+    atom_to_mono_idx_map = (
+        atom_to_mono_idx_map_raw.item()
+        if atom_to_mono_idx_map_raw is not None and atom_to_mono_idx_map_raw.shape == ()
+        else None
+    )
+
+    glycosylation_sites_raw = structure_data.get("glycosylation_sites", None)
+    glycosylation_sites = (
+        None
+        if glycosylation_sites_raw is None or (
+            hasattr(glycosylation_sites_raw, 'shape') and glycosylation_sites_raw.shape == ()
+        )
+        else glycosylation_sites_raw
+    )
+
+    # Create the Structure object.
+    structure = Structure(
+        atoms=structure_data["atoms"],
+        bonds=structure_data["bonds"],
+        residues=structure_data["residues"],
+        chains=structure_data["chains"],
+        connections=structure_data["connections"].astype(Connection),
+        interfaces=structure_data["interfaces"],
+        mask=structure_data["mask"],
+        glycan_feature_map=glycan_feature_map,
+        atom_to_mono_idx_map=atom_to_mono_idx_map,
+        glycosylation_sites=glycosylation_sites,
+    )
+
+    # Load MSAs
     msas = {}
     for chain in record.chains:
         msa_id = chain.msa_id
-        # Load the MSA for this chain, if any
         if msa_id != -1 and msa_id != "":
             msa = np.load(msa_dir / f"{msa_id}.npz")
             msas[chain.chain_id] = MSA(**msa)
@@ -123,28 +137,24 @@ def load_input(record: Record, target_dir: Path, msa_dir: Path) -> Input:
 
 
 def collate(data: list[dict[str, Tensor]]) -> dict[str, Tensor]:
-    """Collate the data.
+    """Collate the data, safely filtering out failed (None) samples."""
+    
+    # Filter out any samples that failed in __getitem__ and returned None.
+    valid_data = [d for d in data if d is not None]
 
-    Parameters
-    ----------
-    data : list[dict[str, Tensor]]
-        The data to collate.
+    if not valid_data:
+        return {}
 
-    Returns
-    -------
-    dict[str, Tensor]
-        The collated data.
+    all_keys = set().union(*[d.keys() for d in valid_data])
+    keys = sorted(list(all_keys))
 
-    """
-    # Get the keys
-    keys = data[0].keys()
-
-    # Collate the data
     collated = {}
     for key in keys:
-        values = [d[key] for d in data]
+        values = [d.get(key) for d in valid_data]
 
         if key not in [
+            "raw_glycosylation_sites",
+            "record_id",
             "all_coords",
             "all_resolved_mask",
             "crop_to_all_atom_map",
@@ -152,19 +162,28 @@ def collate(data: list[dict[str, Tensor]]) -> dict[str, Tensor]:
             "amino_acids_symmetries",
             "ligand_symmetries",
         ]:
-            # Check if all have the same shape
-            shape = values[0].shape
-            if not all(v.shape == shape for v in values):
-                values, _ = pad_to_max(values, 0)
+            tensor_values = [v for v in values if v is not None]
+            if not tensor_values: continue
+            
+            # Check if all tensors in the batch have the same shape.
+            first_shape = tensor_values[0].shape
+            is_ragged = any(v.shape != first_shape for v in tensor_values[1:])
+
+            if is_ragged:
+                try:
+                    # FIX: pad_to_max returns the stacked tensor directly.
+                    # Do not call torch.stack() on the result.
+                    values, _ = pad_to_max(tensor_values, 0)
+                except Exception:
+                    # Fallback to simple stacking (will likely fail if ragged, but preserves original error flow)
+                    values = torch.stack(tensor_values, dim=0)
             else:
-                values = torch.stack(values, dim=0)
-
-        # Stack the values
+                values = torch.stack(tensor_values, dim=0)
+        
         collated[key] = values
-
+    
     return collated
-
-
+    
 class TrainingDataset(torch.utils.data.Dataset):
     """Base iterable dataset."""
 
@@ -217,48 +236,26 @@ class TrainingDataset(torch.utils.data.Dataset):
             iterator = dataset.sampler.sample(records, np.random)
             self.samples.append(iterator)
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        """Get an item from the dataset.
-
-        Parameters
-        ----------
-        idx : int
-            The data index.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The sampled data features.
-
-        """
-        # Pick a random dataset
-        dataset_idx = np.random.choice(
-            len(self.datasets),
-            p=self.probs,
-        )
-        dataset = self.datasets[dataset_idx]
-
-        # Get a sample from the dataset
-        sample: Sample = next(self.samples[dataset_idx])
-
-        # Get the structure
+    def __getitem__(self, idx: int) -> Optional[dict[str, Tensor]]:
+        """Get an item from the dataset, now with robust error handling and safeguards."""
         try:
-            input_data = load_input(sample.record, dataset.target_dir, dataset.msa_dir)
-        except Exception as e:
-            print(
-                f"Failed to load input for {sample.record.id} with error {e}. Skipping."
+            # Pick a random dataset
+            dataset_idx = np.random.choice(
+                len(self.datasets),
+                p=self.probs,
             )
-            return self.__getitem__(idx)
+            dataset = self.datasets[dataset_idx]
 
-        # Tokenize structure
-        try:
+            # Get a sample from the dataset
+            sample: Sample = next(self.samples[dataset_idx])
+
+            # Get the structure
+            input_data = load_input(sample.record, dataset.target_dir, dataset.msa_dir)
+
+            # Tokenize structure
             tokenized = dataset.tokenizer.tokenize(input_data)
-        except Exception as e:
-            print(f"Tokenizer failed on {sample.record.id} with error {e}. Skipping.")
-            return self.__getitem__(idx)
 
-        # Compute crop
-        try:
+            # Compute crop
             if self.max_tokens is not None:
                 tokenized = dataset.cropper.crop(
                     tokenized,
@@ -267,18 +264,15 @@ class TrainingDataset(torch.utils.data.Dataset):
                     random=np.random,
                     chain_id=sample.chain_id,
                     interface_id=sample.interface_id,
+                    record_id=sample.record.id,
                 )
-        except Exception as e:
-            print(f"Cropper failed on {sample.record.id} with error {e}. Skipping.")
-            return self.__getitem__(idx)
 
-        # Check if there are tokens
-        if len(tokenized.tokens) == 0:
-            msg = "No tokens in cropped structure."
-            raise ValueError(msg)
+            # Check if there are tokens
+            if len(tokenized.tokens) == 0:
+                # This is a valid skip, not an error.
+                return self.__getitem__(idx) # Retry instead of returning None
 
-        # Compute features
-        try:
+            # Compute features
             features = dataset.featurizer.process(
                 tokenized,
                 training=True,
@@ -296,11 +290,51 @@ class TrainingDataset(torch.utils.data.Dataset):
                 binder_pocket_cutoff=self.binder_pocket_cutoff,
                 binder_pocket_sampling_geometric_p=self.binder_pocket_sampling_geometric_p,
             )
-        except Exception as e:
-            print(f"Featurizer failed on {sample.record.id} with error {e}. Skipping.")
-            return self.__getitem__(idx)
+            
+            features["record_id"] = sample.record.id
 
-        return features
+            # ==========================================
+            # GPU SHAPE SAFEGUARD (Prevents Model Crash)
+            # ==========================================
+            total_atoms = features["atom_pad_mask"].shape[0]
+            if total_atoms % self.atoms_per_window_queries != 0:
+                raise ValueError(f"Atom count {total_atoms} is not divisible by window size {self.atoms_per_window_queries}!")
+            if self.max_atoms is not None and total_atoms > self.max_atoms:
+                raise ValueError(f"Atom count {total_atoms} exceeds max_atoms {self.max_atoms}!")
+
+            return features
+
+        except MemoryError:
+            record_id = "Unknown (OOM before sample selection)"
+            try:
+                record_id = sample.record.id
+            except NameError:
+                pass
+            
+            print("\n" + "="*80, flush=True)
+            print(f"CRITICAL DATALOADER WARNING: CPU OUT OF MEMORY", flush=True)
+            print(f"  - Record ID causing failure: {record_id}", flush=True)
+            print(f"  - This is likely due to a large, uncropped structure.", flush=True)
+            print(f"  - ACTION: Skipping sample and fetching a new one.", flush=True)
+            print("="*80 + "\n", flush=True)
+            
+            return self.__getitem__(idx) # Retry
+
+        except Exception as e:
+            record_id = "Unknown (error before sample selection)"
+            try:
+                record_id = sample.record.id
+            except NameError:
+                pass
+            
+            print(f"\n--- DATALOADER WORKER ERROR ---", flush=True)
+            print(f"WARNING: An unexpected error occurred while processing record '{record_id}'.", flush=True)
+            print(f"  - Error Type: {type(e).__name__}", flush=True)
+            print(f"  - Error Message: {e}", flush=True)
+            print(f"  - ACTION: Skipping sample and fetching a new one to prevent crash.", flush=True)
+            print(f"-----------------------------\n", flush=True)
+            
+            return self.__getitem__(idx) # Retry
 
     def __len__(self) -> int:
         """Get the length of the dataset.
@@ -361,19 +395,7 @@ class ValidationDataset(torch.utils.data.Dataset):
         self.binder_pocket_cutoff = binder_pocket_cutoff
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        """Get an item from the dataset.
-
-        Parameters
-        ----------
-        idx : int
-            The data index.
-
-        Returns
-        -------
-        dict[str, Tensor]
-            The sampled data features.
-
-        """
+        """Get an item from the dataset."""
         # Pick dataset based on idx
         for dataset in self.datasets:
             size = len(dataset.manifest.records)
@@ -415,8 +437,14 @@ class ValidationDataset(torch.utils.data.Dataset):
 
         # Check if there are tokens
         if len(tokenized.tokens) == 0:
-            msg = "No tokens in cropped structure."
-            raise ValueError(msg)
+            print("\n" + "="*80, flush=True)
+            print(f"[DEBUG] ZERO-TOKEN ERROR FOR VALIDATION RECORD: {record.id}", flush=True)
+            print(f"[DEBUG] File Path Hint: {dataset.target_dir / 'structures' / f'{record.id}.npz'}", flush=True)
+            print(f"[DEBUG] 'crop_validation' setting in use: {self.crop_validation}", flush=True)
+            print(f"[DEBUG] The 'mask' loaded from the npz file is: {input_data.structure.mask}", flush=True)
+            print(f"[DEBUG] Number of chains before masking: {len(input_data.structure.chains)}", flush=True)
+            print("="*80 + "\n", flush=True)
+            return self.__getitem__(0) # Gracefully retry instead of crashing
 
         # Compute features
         try:
@@ -441,12 +469,22 @@ class ValidationDataset(torch.utils.data.Dataset):
                 binder_pocket_sampling_geometric_p=1.0,  # this will only sample a single pocket token
                 only_ligand_binder_pocket=True,
             )
+            
+            # ==========================================
+            # GPU SHAPE SAFEGUARD (Prevents Model Crash)
+            # ==========================================
+            total_atoms = features["atom_pad_mask"].shape[0]
+            if total_atoms % self.atoms_per_window_queries != 0:
+                raise ValueError(f"Atom count {total_atoms} is not divisible by window size {self.atoms_per_window_queries}!")
+            if self.max_atoms is not None and self.crop_validation and total_atoms > self.max_atoms:
+                raise ValueError(f"Atom count {total_atoms} exceeds max_atoms {self.max_atoms}!")
+
         except Exception as e:
-            print(f"Featurizer failed on {record.id} with error {e}. Skipping.")
+            print(f"Featurizer or Shape Verification failed on {record.id} with error {e}. Skipping.")
             return self.__getitem__(0)
 
         return features
-
+        
     def __len__(self) -> int:
         """Get the length of the dataset.
 
