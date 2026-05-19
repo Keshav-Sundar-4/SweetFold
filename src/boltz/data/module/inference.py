@@ -19,8 +19,8 @@ from boltz.data.types import (
     Record,
     ResidueConstraints,
     Structure,
+    GlycosylationSite,
 )
-
 
 def load_input(
     record: Record,
@@ -28,51 +28,67 @@ def load_input(
     msa_dir: Path,
     constraints_dir: Optional[Path] = None,
 ) -> Input:
-    """Load the given input data.
+    # Load the structure NPZ, allowing pickle for dictionary-like objects
+    structure_data = np.load(target_dir / f"{record.id}.npz", allow_pickle=True)
 
-    Parameters
-    ----------
-    record : Record
-        The record to load.
-    target_dir : Path
-        The path to the data directory.
-    msa_dir : Path
-        The path to msa directory.
+    # Extract glycan maps if they exist
+    glycan_feature_map_raw = structure_data.get('glycan_feature_map')
+    glycan_feature_map = None
+    if glycan_feature_map_raw is not None and glycan_feature_map_raw.shape == ():
+        glycan_feature_map = glycan_feature_map_raw.item()
 
-    Returns
-    -------
-    Input
-        The loaded input.
+    atom_to_mono_idx_map_raw = structure_data.get('atom_to_mono_idx_map')
+    atom_to_mono_idx_map = None
+    if atom_to_mono_idx_map_raw is not None and atom_to_mono_idx_map_raw.shape == ():
+        atom_to_mono_idx_map = atom_to_mono_idx_map_raw.item()
 
-    """
-    # Load the structure
-    structure = np.load(target_dir / f"{record.id}.npz")
+    # Handle glycosylation sites
+    glyco_raw = structure_data.get('glycosylation_sites', None)
+    glycosylation_sites = None
+
+    if glyco_raw is not None:
+        # Check if it is a 0-d array containing None (result of np.savez with None)
+        if glyco_raw.shape == () and glyco_raw.item() is None:
+            glycosylation_sites = None
+        # Check if it's explicitly empty
+        elif glyco_raw.size == 0:
+            glycosylation_sites = None
+        else:
+            glycosylation_sites = glyco_raw
+
+    # Reconstruct the Structure object
     structure = Structure(
-        atoms=structure["atoms"],
-        bonds=structure["bonds"],
-        residues=structure["residues"],
-        chains=structure["chains"],
-        connections=structure["connections"].astype(Connection),
-        interfaces=structure["interfaces"],
-        mask=structure["mask"],
+        atoms=structure_data["atoms"],
+        bonds=structure_data["bonds"],
+        residues=structure_data["residues"],
+        chains=structure_data["chains"],
+        connections=structure_data["connections"].astype(Connection),
+        interfaces=structure_data["interfaces"],
+        mask=structure_data["mask"],
+        glycan_feature_map=glycan_feature_map,
+        atom_to_mono_idx_map=atom_to_mono_idx_map,
+        glycosylation_sites=glycosylation_sites,  
     )
 
     msas = {}
     for chain in record.chains:
-        msa_id = chain.msa_id
-        # Load the MSA for this chain, if any
-        if msa_id != -1:
-            msa = np.load(msa_dir / f"{msa_id}.npz")
-            msas[chain.chain_id] = MSA(**msa)
+        if (msa_id := chain.msa_id) != -1:
+            try:
+                msa = np.load(msa_dir / f"{msa_id}.npz")
+                msas[chain.chain_id] = MSA(**msa)
+            except FileNotFoundError:
+                pass
 
     residue_constraints = None
     if constraints_dir is not None:
-        residue_constraints = ResidueConstraints.load(
-            constraints_dir / f"{record.id}.npz"
-        )
+        try:
+            residue_constraints = ResidueConstraints.load(
+                constraints_dir / f"{record.id}.npz"
+            )
+        except FileNotFoundError:
+            pass
 
     return Input(structure, msas, residue_constraints=residue_constraints)
-
 
 def collate(data: list[dict[str, Tensor]]) -> dict[str, Tensor]:
     """Collate the data.
@@ -119,7 +135,7 @@ def collate(data: list[dict[str, Tensor]]) -> dict[str, Tensor]:
 
 
 class PredictionDataset(torch.utils.data.Dataset):
-    """Base iterable dataset."""
+    """Base iterable dataset for prediction."""
 
     def __init__(
         self,
@@ -128,7 +144,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         msa_dir: Path,
         constraints_dir: Optional[Path] = None,
     ) -> None:
-        """Initialize the training dataset.
+        """Initialize the prediction dataset.
 
         Parameters
         ----------
@@ -138,7 +154,8 @@ class PredictionDataset(torch.utils.data.Dataset):
             The path to the target directory.
         msa_dir : Path
             The path to the msa directory.
-
+        constraints_dir : Optional[Path], optional
+            The path to the residue constraints directory, by default None.
         """
         super().__init__()
         self.manifest = manifest
@@ -155,12 +172,8 @@ class PredictionDataset(torch.utils.data.Dataset):
         -------
         Dict[str, Tensor]
             The sampled data features.
-
         """
-        # Get a sample from the dataset
         record = self.manifest.records[idx]
-
-        # Get the structure
         try:
             input_data = load_input(
                 record,
@@ -168,26 +181,11 @@ class PredictionDataset(torch.utils.data.Dataset):
                 self.msa_dir,
                 self.constraints_dir,
             )
-        except Exception as e:  # noqa: BLE001
-            print(f"Failed to load input for {record.id} with error {e}. Skipping.")  # noqa: T201
-            return self.__getitem__(0)
-
-        # Tokenize structure
-        try:
             tokenized = self.tokenizer.tokenize(input_data)
-        except Exception as e:  # noqa: BLE001
-            print(f"Tokenizer failed on {record.id} with error {e}. Skipping.")  # noqa: T201
-            return self.__getitem__(0)
 
-        # Inference specific options
-        options = record.inference_options
-        if options is None:
-            binders, pocket = None, None
-        else:
-            binders, pocket = options.binders, options.pocket
+            options = record.inference_options
+            binders, pocket = (options.binders, options.pocket) if options else (None, None)
 
-        # Compute features
-        try:
             features = self.featurizer.process(
                 tokenized,
                 training=False,
@@ -199,25 +197,21 @@ class PredictionDataset(torch.utils.data.Dataset):
                 compute_symmetries=False,
                 inference_binder=binders,
                 inference_pocket=pocket,
-                compute_constraint_features=True,
+                compute_constraint_features=True, # Preserved from Boltz-1x
+                compute_glycan_features=True,     # Added for glycan logic
             )
-        except Exception as e:  # noqa: BLE001
-            print(f"Featurizer failed on {record.id} with error {e}. Skipping.")  # noqa: T201
-            return self.__getitem__(0)
+        except Exception as e:
+            print(f"Processing failed for {record.id} with error: {e}. Skipping.")
+            # Safely skip to the next item on error
+            return self.__getitem__((idx + 1) % len(self))
 
         features["record"] = record
         return features
 
     def __len__(self) -> int:
-        """Get the length of the dataset.
-
-        Returns
-        -------
-        int
-            The length of the dataset.
-
-        """
+        """Get the length of the dataset."""
         return len(self.manifest.records)
+
 
 
 class BoltzInferenceDataModule(pl.LightningDataModule):
