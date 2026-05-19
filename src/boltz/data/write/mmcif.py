@@ -58,8 +58,17 @@ def to_mmcif(structure: Structure, plddts: Optional[Tensor] = None) -> str:  # n
     # Create entity objects
     lig_entity = None
     entities_map = {}
+
+    # Cache to deduplicate Entity objects based on sequence content.
+    # This prevents the "Duplicate entity" error in IHM when multiple
+    # distinct input entities share the exact same chemical sequence.
+    sequence_to_entity_cache = {}
+
     for entity, sequence in sequences.items():
         mol_type = entity_to_moltype[entity]
+        
+        # Create a hashable signature for the sequence
+        seq_signature = tuple(sequence)
 
         if mol_type == const.chain_type_ids["PROTEIN"]:
             alphabet = ihm.LPeptideAlphabet()
@@ -77,18 +86,25 @@ def to_mmcif(structure: Structure, plddts: Optional[Tensor] = None) -> str:  # n
             alphabet = {}
             chem_comp = lambda x: ihm.NonPolymerChemComp(id=x)  # noqa: E731
 
-        # Handle smiles
+        # Handle smiles (special singleton case for generic LIG)
         if len(sequence) == 1 and (sequence[0] == "LIG"):
             if lig_entity is None:
                 seq = [chem_comp(sequence[0])]
                 lig_entity = Entity(seq)
             model_e = lig_entity
+        
+        # Check cache: if this sequence exists, reuse the existing Entity object
+        elif seq_signature in sequence_to_entity_cache:
+            model_e = sequence_to_entity_cache[seq_signature]
+            
         else:
             seq = [
                 alphabet[item] if item in alphabet else chem_comp(item)
                 for item in sequence
             ]
             model_e = Entity(seq)
+            # Store new entity in cache
+            sequence_to_entity_cache[seq_signature] = model_e
 
         for chain in entity_to_chains[entity]:
             chain_idx = chain["asym_id"]
