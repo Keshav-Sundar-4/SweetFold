@@ -1,10 +1,15 @@
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, Union
+import sys
+from typing import Optional, Union, Dict, Any, Tuple
 
 import numpy as np
 from mashumaro.mixins.dict import DataClassDictMixin
+try:
+    from boltz.data.parse.schema import MonosaccharideFeatureMapType
+except ImportError:
+    MonosaccharideFeatureMapType = Dict[Tuple[int, int], Any]
 
 ####################################################################################################
 # SERIALIZABLE
@@ -136,6 +141,15 @@ Interface = [
     ("chain_2", np.dtype("i4")),
 ]
 
+GlycosylationSite = [
+    ("protein_chain_id", np.dtype("i4")),
+    ("protein_res_id", np.dtype("i4")),
+    ("protein_atom_name", np.dtype("<U4")),
+    ("glycan_chain_id", np.dtype("i4")),    
+    ("glycan_res_id", np.dtype("i4")),
+    ("glycan_atom_name", np.dtype("<U4")),
+]
+
 
 @dataclass(frozen=True)
 class Structure(NumpySerializable):
@@ -148,148 +162,148 @@ class Structure(NumpySerializable):
     connections: np.ndarray
     interfaces: np.ndarray
     mask: np.ndarray
+    # ADDED: Glycan-specific fields from Boltz-Glycan
+    glycosylation_sites: Optional[np.ndarray] = None
+    glycan_feature_map: Optional[MonosaccharideFeatureMapType] = None
+    atom_to_mono_idx_map: Optional[Dict[int, np.ndarray]] = None
+
 
     @classmethod
     def load(cls: "Structure", path: Path) -> "Structure":
-        """Load a structure from an NPZ file.
-
-        Parameters
-        ----------
-        path : Path
-            The path to the file.
-
-        Returns
-        -------
-        Structure
-            The loaded structure.
-
         """
-        structure = np.load(path)
+        (Corrected Version) Load a structure from an NPZ file, handling all fields.
+        """
+        data = np.load(path, allow_pickle=True)
+        
+        glycan_feature_map_raw = data.get("glycan_feature_map", None)
+        glycan_feature_map = glycan_feature_map_raw.item() if glycan_feature_map_raw is not None and glycan_feature_map_raw.shape == () else None
+
+        atom_to_mono_idx_map_raw = data.get("atom_to_mono_idx_map", None)
+        atom_to_mono_idx_map = atom_to_mono_idx_map_raw.item() if atom_to_mono_idx_map_raw is not None and atom_to_mono_idx_map_raw.shape == () else None
+        
+        glycosylation_sites = data.get("glycosylation_sites", None)
+        
+        # FIX: Robustly handle 0-d arrays containing None (serialized from np.savez)
+        if glycosylation_sites is not None:
+             if glycosylation_sites.shape == () and glycosylation_sites.item() is None:
+                 glycosylation_sites = None
+             elif glycosylation_sites.size == 0:
+                 glycosylation_sites = None
+
         return cls(
-            atoms=structure["atoms"],
-            bonds=structure["bonds"],
-            residues=structure["residues"],
-            chains=structure["chains"],
-            connections=structure["connections"].astype(Connection),
-            interfaces=structure["interfaces"],
-            mask=structure["mask"],
+            atoms=data["atoms"],
+            bonds=data["bonds"],
+            residues=data["residues"],
+            chains=data["chains"],
+            connections=data.get("connections", np.array([], dtype=Connection)),
+            interfaces=data.get("interfaces", np.array([], dtype=Interface)),
+            mask=data["mask"],
+            glycosylation_sites=glycosylation_sites,
+            glycan_feature_map=glycan_feature_map,
+            atom_to_mono_idx_map=atom_to_mono_idx_map,
         )
-
+        
     def remove_invalid_chains(self) -> "Structure":  # noqa: PLR0915
-        """Remove invalid chains.
-
-        Parameters
-        ----------
-        structure : Structure
-            The structure to process.
-
-        Returns
-        -------
-        Structure
-            The structure with masked chains removed.
-
+        """
+        Filters the structure to include only chains marked as True in self.mask.
+        Re-indexes all structures and updates references.
         """
         entity_counter = {}
         atom_idx, res_idx, chain_idx = 0, 0, 0
         atoms, residues, chains = [], [], []
         atom_map, res_map, chain_map = {}, {}, {}
+
         for i, chain in enumerate(self.chains):
-            # Skip masked chains
             if not self.mask[i]:
                 continue
 
-            # Update entity counter
             entity_id = chain["entity_id"]
-            if entity_id not in entity_counter:
-                entity_counter[entity_id] = 0
-            else:
-                entity_counter[entity_id] += 1
+            entity_counter[entity_id] = entity_counter.get(entity_id, -1) + 1
 
-            # Update the chain
             new_chain = chain.copy()
-            new_chain["atom_idx"] = atom_idx
-            new_chain["res_idx"] = res_idx
-            new_chain["asym_id"] = chain_idx
-            new_chain["sym_id"] = entity_counter[entity_id]
+            new_chain["atom_idx"], new_chain["res_idx"], new_chain["asym_id"], new_chain["sym_id"] = \
+                atom_idx, res_idx, chain_idx, entity_counter[entity_id]
             chains.append(new_chain)
+            
+            # Map Old Chain Index (i) -> New Chain Index (chain_idx)
             chain_map[i] = chain_idx
             chain_idx += 1
 
-            # Add the chain residues
-            res_start = chain["res_idx"]
-            res_end = chain["res_idx"] + chain["res_num"]
+            res_start, res_end = chain["res_idx"], chain["res_idx"] + chain["res_num"]
             for j, res in enumerate(self.residues[res_start:res_end]):
-                # Update the residue
                 new_res = res.copy()
                 new_res["atom_idx"] = atom_idx
-                new_res["atom_center"] = (
-                    atom_idx + new_res["atom_center"] - res["atom_idx"]
-                )
-                new_res["atom_disto"] = (
-                    atom_idx + new_res["atom_disto"] - res["atom_idx"]
-                )
+                new_res["atom_center"] = atom_idx + new_res["atom_center"] - res["atom_idx"]
+                new_res["atom_disto"] = atom_idx + new_res["atom_disto"] - res["atom_idx"]
                 residues.append(new_res)
                 res_map[res_start + j] = res_idx
                 res_idx += 1
 
-                # Update the atoms
-                start = res["atom_idx"]
-                end = res["atom_idx"] + res["atom_num"]
+                start, end = res["atom_idx"], res["atom_idx"] + res["atom_num"]
                 atoms.append(self.atoms[start:end])
                 atom_map.update({k: atom_idx + k - start for k in range(start, end)})
                 atom_idx += res["atom_num"]
 
-        # Concatenate the tables
-        atoms = np.concatenate(atoms, dtype=Atom)
+        # 1. Update glycosylation sites
+        new_glycosylation_sites = []
+        if self.glycosylation_sites is not None and self.glycosylation_sites.size > 0:
+            for site in self.glycosylation_sites:
+                old_p_chain_id, old_g_chain_id = site["protein_chain_id"], site["glycan_chain_id"]
+                if old_p_chain_id in chain_map and old_g_chain_id in chain_map:
+                    new_site = site.copy()
+                    new_site["protein_chain_id"] = chain_map[old_p_chain_id]
+                    new_site["glycan_chain_id"] = chain_map[old_g_chain_id]
+                    new_glycosylation_sites.append(new_site)
+
+        updated_sites_arr = np.array(new_glycosylation_sites, dtype=GlycosylationSite) if new_glycosylation_sites else np.array([], dtype=GlycosylationSite)
+
+        # 2. Update Glycan Feature Map Keys
+        new_glycan_feature_map = {}
+        if self.glycan_feature_map is not None:
+            for (old_chain_idx, mono_idx), feature_obj in self.glycan_feature_map.items():
+                if old_chain_idx in chain_map:
+                    new_chain_idx = chain_map[old_chain_idx]
+                    # Update the key with the new chain index
+                    new_glycan_feature_map[(new_chain_idx, mono_idx)] = feature_obj
+
+        # 3. Update Atom-to-Mono-Idx Map Keys
+        new_atom_to_mono_idx_map = {}
+        if self.atom_to_mono_idx_map is not None:
+            for old_chain_idx, array_data in self.atom_to_mono_idx_map.items():
+                if old_chain_idx in chain_map:
+                    new_chain_idx = chain_map[old_chain_idx]
+                    # Update the key with the new chain index
+                    new_atom_to_mono_idx_map[new_chain_idx] = array_data
+
+        # Rebuild final numpy arrays
+        atoms = np.concatenate(atoms, dtype=Atom) if atoms else np.array([], dtype=Atom)
         residues = np.array(residues, dtype=Residue)
         chains = np.array(chains, dtype=Chain)
 
-        # Update bonds
-        bonds = []
-        for bond in self.bonds:
-            atom_1 = bond["atom_1"]
-            atom_2 = bond["atom_2"]
-            if (atom_1 in atom_map) and (atom_2 in atom_map):
-                new_bond = bond.copy()
-                new_bond["atom_1"] = atom_map[atom_1]
-                new_bond["atom_2"] = atom_map[atom_2]
-                bonds.append(new_bond)
+        bonds = [
+            (atom_map[b["atom_1"]], atom_map[b["atom_2"]], b["type"])
+            for b in self.bonds
+            if b["atom_1"] in atom_map and b["atom_2"] in atom_map
+        ]
 
-        # Update connections
-        connections = []
-        for connection in self.connections:
-            chain_1 = connection["chain_1"]
-            chain_2 = connection["chain_2"]
-            res_1 = connection["res_1"]
-            res_2 = connection["res_2"]
-            atom_1 = connection["atom_1"]
-            atom_2 = connection["atom_2"]
-            if (atom_1 in atom_map) and (atom_2 in atom_map):
-                new_connection = connection.copy()
-                new_connection["chain_1"] = chain_map[chain_1]
-                new_connection["chain_2"] = chain_map[chain_2]
-                new_connection["res_1"] = res_map[res_1]
-                new_connection["res_2"] = res_map[res_2]
-                new_connection["atom_1"] = atom_map[atom_1]
-                new_connection["atom_2"] = atom_map[atom_2]
-                connections.append(new_connection)
-
-        # Create arrays
-        bonds = np.array(bonds, dtype=Bond)
-        connections = np.array(connections, dtype=Connection)
-        interfaces = np.array([], dtype=Interface)
-        mask = np.ones(len(chains), dtype=bool)
+        connections = [
+            (chain_map[c["chain_1"]], chain_map[c["chain_2"]], res_map[c["res_1"]], res_map[c["res_2"]], atom_map[c["atom_1"]], atom_map[c["atom_2"]])
+            for c in self.connections
+            if c["atom_1"] in atom_map and c["atom_2"] in atom_map
+        ]
 
         return Structure(
             atoms=atoms,
-            bonds=bonds,
+            bonds=np.array(bonds, dtype=Bond),
             residues=residues,
             chains=chains,
-            connections=connections,
-            interfaces=interfaces,
-            mask=mask,
+            connections=np.array(connections, dtype=Connection),
+            interfaces=np.array([], dtype=Interface),
+            mask=np.ones(len(chains), dtype=bool),
+            glycosylation_sites=updated_sites_arr,
+            glycan_feature_map=new_glycan_feature_map,     # PASS UPDATED MAP
+            atom_to_mono_idx_map=new_atom_to_mono_idx_map, # PASS UPDATED MAP
         )
-
 
 ####################################################################################################
 # MSA
@@ -542,3 +556,4 @@ class Tokenized:
     structure: Structure
     msa: dict[str, MSA]
     residue_constraints: Optional[ResidueConstraints] = None
+
