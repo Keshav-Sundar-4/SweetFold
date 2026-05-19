@@ -1,12 +1,18 @@
 import gc
 import random
-from typing import Any, Optional
+from typing import Dict, Optional, List, Tuple, Any
 
 import torch
 import torch._dynamo
 from pytorch_lightning import LightningModule
 from torch import Tensor, nn
 from torchmetrics import MeanMetric
+import sys
+import os
+from functools import partial
+from boltz.model.modules.encoders import get_indexing_matrix, single_to_keys
+from boltz.model.modules.sugar_trunk import _get_glycosylation_features
+from boltz.model.modules.sugar_trunk import compute_glycan_stereobias
 
 import boltz.model.layers.initialize as init
 from boltz.data import const
@@ -14,6 +20,11 @@ from boltz.data.feature.symmetry import (
     minimum_lddt_symmetry_coords,
     minimum_symmetry_coords,
 )
+from boltz.model.modules.sugar_trunk import (
+    SugarPairformer, 
+    stereo_discovery,
+)
+from boltz.model.modules.sugar_trunk import get_anomeric_pair_features
 from boltz.model.loss.confidence import confidence_loss
 from boltz.model.loss.distogram import distogram_loss
 from boltz.model.loss.validation import (
@@ -23,6 +34,8 @@ from boltz.model.loss.validation import (
     factored_lddt_loss,
     factored_token_lddt_dist_loss,
     weighted_minimum_rmsd,
+    compute_glycan_dihedral_validation,
+    compute_rmsd_glycan,
 )
 from boltz.model.modules.confidence import ConfidenceModule
 from boltz.model.modules.diffusion import AtomDiffusion
@@ -36,11 +49,10 @@ from boltz.model.modules.trunk import (
 from boltz.model.modules.utils import ExponentialMovingAverage
 from boltz.model.optim.scheduler import AlphaFoldLRScheduler
 
-
 class Boltz1(LightningModule):
     """Boltz1 model."""
 
-    def __init__(  # noqa: PLR0915, C901, PLR0912
+    def __init__(
         self,
         atom_s: int,
         atom_z: int,
@@ -76,11 +88,11 @@ class Boltz1(LightningModule):
         min_dist: float = 2.0,
         max_dist: float = 22.0,
         predict_args: Optional[dict[str, Any]] = None,
+        glycan_bias_args: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__()
 
         self.save_hyperparameters()
-
         self.lddt = nn.ModuleDict()
         self.disto_lddt = nn.ModuleDict()
         self.complex_lddt = nn.ModuleDict()
@@ -118,15 +130,13 @@ class Boltz1(LightningModule):
                 self.plddt_mae[m] = MeanMetric()
         self.rmsd = MeanMetric()
         self.best_rmsd = MeanMetric()
+        self.rmsd_glycan = MeanMetric()
+        self.glycan_anomeric_dihedral_loss = MeanMetric()
+        self.glycan_ring_dihedral_loss = MeanMetric()
 
         self.train_confidence_loss_logger = MeanMetric()
         self.train_confidence_loss_dict_logger = nn.ModuleDict()
-        for m in [
-            "plddt_loss",
-            "resolved_loss",
-            "pde_loss",
-            "pae_loss",
-        ]:
+        for m in ["plddt_loss", "resolved_loss", "pde_loss", "pae_loss"]:
             self.train_confidence_loss_dict_logger[m] = MeanMetric()
 
         self.ema = None
@@ -146,8 +156,8 @@ class Boltz1(LightningModule):
         self.min_dist = min_dist
         self.max_dist = max_dist
         self.is_pairformer_compiled = False
+        self.is_sugar_pairformer_compiled = False
 
-        # Input projections
         s_input_dim = (
             token_s + 2 * const.num_tokens + 1 + len(const.pocket_contact_info)
         )
@@ -155,7 +165,6 @@ class Boltz1(LightningModule):
         self.z_init_1 = nn.Linear(s_input_dim, token_z, bias=False)
         self.z_init_2 = nn.Linear(s_input_dim, token_z, bias=False)
 
-        # Input embeddings
         full_embedder_args = {
             "atom_s": atom_s,
             "atom_z": atom_z,
@@ -170,18 +179,26 @@ class Boltz1(LightningModule):
         self.input_embedder = InputEmbedder(**full_embedder_args)
         self.rel_pos = RelativePositionEncoder(token_z)
         self.token_bonds = nn.Linear(1, token_z, bias=False)
+        
+        # --- THE GOLDILOCKS FIX: Non-Linear MLP ---
+        # Allows the network to learn interactions (e.g., Galactose AND C4)
+        self.stereo_proj = nn.Sequential(
+            nn.Linear(931 + 64 + 64, 256, bias=True),
+            nn.GELU(),
+            nn.Linear(256, token_z, bias=False)
+        )
+        
+        # Initialize the last layer to near-zero so it starts as a gentle bias
+        torch.nn.init.normal_(self.stereo_proj[2].weight, mean=0.0, std=0.02)
 
-        # Normalization layers
         self.s_norm = nn.LayerNorm(token_s)
         self.z_norm = nn.LayerNorm(token_z)
 
-        # Recycling projections
         self.s_recycle = nn.Linear(token_s, token_s, bias=False)
         self.z_recycle = nn.Linear(token_z, token_z, bias=False)
         init.gating_init_(self.s_recycle.weight)
         init.gating_init_(self.z_recycle.weight)
 
-        # Pairwise stack
         self.no_msa = no_msa
         if not no_msa:
             self.msa_module = MSAModule(
@@ -189,19 +206,32 @@ class Boltz1(LightningModule):
                 s_input_dim=s_input_dim,
                 **msa_args,
             )
+            
+        # Omit **pairformer_args so it relies on the internal small defaults!
+        self.sugar_pairformer_module = SugarPairformer(
+            token_s=token_s, 
+            token_z=token_z,
+            activation_checkpointing=pairformer_args.get("activation_checkpointing", False),
+            offload_to_cpu=pairformer_args.get("offload_to_cpu", False)
+        )
         self.pairformer_module = PairformerModule(token_s, token_z, **pairformer_args)
+        
         if compile_pairformer:
-            # Big models hit the default cache limit (8)
             self.is_pairformer_compiled = True
+            self.is_sugar_pairformer_compiled = True
             torch._dynamo.config.cache_size_limit = 512
             torch._dynamo.config.accumulated_cache_size_limit = 512
+            self.sugar_pairformer_module = torch.compile(
+                self.sugar_pairformer_module,
+                dynamic=False,
+                fullgraph=False,
+            )
             self.pairformer_module = torch.compile(
                 self.pairformer_module,
                 dynamic=False,
                 fullgraph=False,
             )
 
-        # Output modules
         use_accumulate_token_repr = (
             confidence_prediction
             and "use_s_diffusion" in confidence_model_args
@@ -230,21 +260,27 @@ class Boltz1(LightningModule):
         self.confidence_imitate_trunk = confidence_imitate_trunk
         if self.confidence_prediction:
             if self.confidence_imitate_trunk:
+                confidence_full_embedder_args = full_embedder_args.copy()
                 self.confidence_module = ConfidenceModule(
                     token_s,
                     token_z,
                     compute_pae=alpha_pae > 0,
                     imitate_trunk=True,
                     pairformer_args=pairformer_args,
-                    full_embedder_args=full_embedder_args,
+                    full_embedder_args=confidence_full_embedder_args,
                     msa_args=msa_args,
+                    glycan_bias_args=glycan_bias_args,
+                    stereo_proj=self.stereo_proj,
                     **confidence_model_args,
                 )
             else:
                 self.confidence_module = ConfidenceModule(
                     token_s,
                     token_z,
+                    pairformer_args=pairformer_args,
+                    glycan_bias_args=glycan_bias_args,
                     compute_pae=alpha_pae > 0,
+                    stereo_proj=self.stereo_proj,
                     **confidence_model_args,
                 )
             if compile_confidence:
@@ -252,96 +288,107 @@ class Boltz1(LightningModule):
                     self.confidence_module, dynamic=False, fullgraph=False
                 )
 
-        # Remove grad from weights they are not trained for ddp
-        if not structure_prediction_training:
-            for name, param in self.named_parameters():
-                if name.split(".")[0] != "confidence_module":
-                    param.requires_grad = False
+        self._configure_parameter_grads()
+
+    def _configure_parameter_grads(self) -> None:
+        print("[Model Grad Config] MODE: Full Fine-Tuning (NO FROZEN PARAMETERS).")
+
+        # 1. Enable gradients for ALL parameters
+        for param in self.parameters():
+            param.requires_grad = True
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.parameters())
+        
+        print("-" * 50)
+        print(f"[Model Grad Config] Total parameters:     {total_params:,}")
+        print(f"[Model Grad Config] Trainable parameters: {trainable_params:,}")
+        print("-" * 50)
+
+        if self.training and trainable_params == 0:
+            print("CRITICAL WARNING: No trainable parameters were found for the current training configuration.")
 
     def forward(
         self,
-        feats: dict[str, Tensor],
+        feats: Dict[str, Any],
         recycling_steps: int = 0,
         num_sampling_steps: Optional[int] = None,
         multiplicity_diffusion_train: int = 1,
         diffusion_samples: int = 1,
         run_confidence_sequentially: bool = False,
-    ) -> dict[str, Tensor]:
-        dict_out = {}
+    ) -> Dict[str, torch.Tensor]:
+        dict_out: Dict[str, torch.Tensor] = {}
 
-        # Compute input embeddings
         with torch.set_grad_enabled(
-            self.training and self.structure_prediction_training
+            self.training and self.hparams.structure_prediction_training
         ):
+            # 1. Input Embedding
             s_inputs = self.input_embedder(feats)
-
-            # Initialize the sequence and pairwise embeddings
             s_init = self.s_init(s_inputs)
             z_init = (
                 self.z_init_1(s_inputs)[:, :, None]
                 + self.z_init_2(s_inputs)[:, None, :]
             )
+            
+            # 2. Geometric & Topological encodings
             relative_position_encoding = self.rel_pos(feats)
             z_init = z_init + relative_position_encoding
             z_init = z_init + self.token_bonds(feats["token_bonds"].float())
+            
+            # --- DDP-PROOFING: Always touch stereo_proj parameters ---
+            stereo_dummy = sum(p.sum() for p in self.stereo_proj.parameters())
+            z_init = z_init + (0.0 * stereo_dummy)
 
-            # Perform rounds of the pairwise stack
+            z_init = z_init + compute_glycan_stereobias(z_init, feats, self.stereo_proj)
+            
+            # 4. Trunk Processing
             s = torch.zeros_like(s_init)
             z = torch.zeros_like(z_init)
-
-            # Compute pairwise mask
             mask = feats["token_pad_mask"].float()
             pair_mask = mask[:, :, None] * mask[:, None, :]
 
             for i in range(recycling_steps + 1):
                 with torch.set_grad_enabled(self.training and (i == recycling_steps)):
-                    # Fixes an issue with unused parameters in autocast
-                    if (
-                        self.training
-                        and (i == recycling_steps)
-                        and torch.is_autocast_enabled()
-                    ):
+                    if self.training and (i == recycling_steps) and torch.is_autocast_enabled():
                         torch.clear_autocast_cache()
 
-                    # Apply recycling
                     s = s_init + self.s_recycle(self.s_norm(s))
                     z = z_init + self.z_recycle(self.z_norm(z))
 
-                    # Compute pairwise stack
                     if not self.no_msa:
                         z = z + self.msa_module(z, s_inputs, feats)
 
-                    # Revert to uncompiled version for validation
-                    if self.is_pairformer_compiled and not self.training:
-                        pairformer_module = self.pairformer_module._orig_mod  # noqa: SLF001
-                    else:
-                        pairformer_module = self.pairformer_module
+                    sugar_pairformer_module = (
+                        self.sugar_pairformer_module._orig_mod 
+                        if (self.is_sugar_pairformer_compiled and not self.training) 
+                        else self.sugar_pairformer_module
+                    )
+                    s, z = sugar_pairformer_module(s, z, feats)
 
+                    pairformer_module = (
+                        self.pairformer_module._orig_mod 
+                        if (self.is_pairformer_compiled and not self.training) 
+                        else self.pairformer_module
+                    )
+                    
                     s, z = pairformer_module(s, z, mask=mask, pair_mask=pair_mask)
 
-            pdistogram = self.distogram_module(z)
-            dict_out = {"pdistogram": pdistogram}
+            dict_out["pdistogram"] = self.distogram_module(z)
 
-        # Compute structure module
-        if self.training and self.structure_prediction_training:
+        # (Rest of the function remains same...)
+        if self.training and self.hparams.structure_prediction_training:
             dict_out.update(
                 self.structure_module(
-                    s_trunk=s,
-                    z_trunk=z,
-                    s_inputs=s_inputs,
-                    feats=feats,
+                    s_trunk=s, z_trunk=z, s_inputs=s_inputs, feats=feats,
                     relative_position_encoding=relative_position_encoding,
                     multiplicity=multiplicity_diffusion_train,
                 )
             )
-
+        
         if (not self.training) or self.confidence_prediction:
             dict_out.update(
                 self.structure_module.sample(
-                    s_trunk=s,
-                    z_trunk=z,
-                    s_inputs=s_inputs,
-                    feats=feats,
+                    s_trunk=s, z_trunk=z, s_inputs=s_inputs, feats=feats,
                     relative_position_encoding=relative_position_encoding,
                     num_sampling_steps=num_sampling_steps,
                     atom_mask=feats["atom_pad_mask"],
@@ -352,25 +399,28 @@ class Boltz1(LightningModule):
             )
 
         if self.confidence_prediction:
+            s_diffusion_repr = (
+                dict_out["diff_token_repr"]
+                if self.confidence_module.use_s_diffusion and "diff_token_repr" in dict_out
+                else None
+            )
+            
             dict_out.update(
                 self.confidence_module(
                     s_inputs=s_inputs.detach(),
                     s=s.detach(),
                     z=z.detach(),
-                    s_diffusion=(
-                        dict_out["diff_token_repr"]
-                        if self.confidence_module.use_s_diffusion
-                        else None
-                    ),
+                    s_diffusion=s_diffusion_repr,
                     x_pred=dict_out["sample_atom_coords"].detach(),
-                    feats=feats,
+                    feats=detach_feats(feats), 
                     pred_distogram_logits=dict_out["pdistogram"].detach(),
                     multiplicity=diffusion_samples,
                     run_sequentially=run_confidence_sequentially,
                 )
             )
-        if self.confidence_prediction and self.confidence_module.use_s_diffusion:
-            dict_out.pop("diff_token_repr", None)
+            if self.confidence_module.use_s_diffusion:
+                dict_out.pop("diff_token_repr", None)
+        
         return dict_out
 
     def get_true_coordinates(
@@ -430,6 +480,7 @@ class Boltz1(LightningModule):
         return true_coords, rmsds, best_rmsds, true_coords_resolved_mask
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
+
         # Sample recycling steps
         recycling_steps = random.randint(0, self.training_args.recycling_steps)
 
@@ -443,72 +494,58 @@ class Boltz1(LightningModule):
         )
 
         # Compute losses
-        if self.structure_prediction_training:
-            disto_loss, _ = distogram_loss(
-                out,
-                batch,
-            )
-            try:
-                diffusion_loss_dict = self.structure_module.compute_loss(
-                    batch,
-                    out,
-                    multiplicity=self.training_args.diffusion_multiplicity,
-                    **self.diffusion_loss_args,
-                )
-            except Exception as e:
-                print(f"Skipping batch {batch_idx} due to error: {e}")
-                return None
+        disto_loss, _ = distogram_loss(out, batch)
+        
+        # This call is now DDP-safe because compute_loss handles the internal logic
+        diffusion_loss_dict = self.structure_module.compute_loss(
+            batch,
+            out,
+            multiplicity=self.training_args.diffusion_multiplicity,
+            **self.diffusion_loss_args,
+        )
 
-        else:
-            disto_loss = 0.0
-            diffusion_loss_dict = {"loss": 0.0, "loss_breakdown": {}}
-
+        # This will be computed only if confidence_prediction is true
         if self.confidence_prediction:
-            # confidence model symmetry correction
             true_coords, _, _, true_coords_resolved_mask = self.get_true_coordinates(
-                batch,
-                out,
-                diffusion_samples=self.training_args.diffusion_samples,
-                symmetry_correction=self.training_args.symmetry_correction,
+                batch, out, self.training_args.diffusion_samples, self.training_args.symmetry_correction
             )
-
             confidence_loss_dict = confidence_loss(
-                out,
-                batch,
-                true_coords,
-                true_coords_resolved_mask,
-                alpha_pae=self.alpha_pae,
-                multiplicity=self.training_args.diffusion_samples,
+                out, batch, true_coords, true_coords_resolved_mask,
+                alpha_pae=self.alpha_pae, multiplicity=self.training_args.diffusion_samples
             )
         else:
-            confidence_loss_dict = {
-                "loss": torch.tensor(0.0).to(batch["token_index"].device),
-                "loss_breakdown": {},
-            }
+            confidence_loss_dict = {"loss": torch.tensor(0.0, device=self.device)}
 
-        # Aggregate losses
+        # Aggregate losses (already handled inside compute_loss, just need to combine with others)
         loss = (
             self.training_args.confidence_loss_weight * confidence_loss_dict["loss"]
             + self.training_args.diffusion_loss_weight * diffusion_loss_dict["loss"]
             + self.training_args.distogram_loss_weight * disto_loss
         )
+        
         # Log losses
         self.log("train/distogram_loss", disto_loss)
         self.log("train/diffusion_loss", diffusion_loss_dict["loss"])
+
+        # --- THIS IS THE KEY CHANGE ---
+        # Log each loss component, but ONLY if its value is not None.
+        # This prevents logging a zero for inapplicable losses and keeps metrics clean.
         for k, v in diffusion_loss_dict["loss_breakdown"].items():
-            self.log(f"train/{k}", v)
+            if v is not None:
+                self.log(f"train/{k}", v)
+        # --- END CHANGE ---
 
         if self.confidence_prediction:
-            self.train_confidence_loss_logger.update(
-                confidence_loss_dict["loss"].detach()
-            )
-
+            # ... (rest of the confidence logging is the same) ...
+            self.train_confidence_loss_logger.update(confidence_loss_dict["loss"].detach())
             for k in self.train_confidence_loss_dict_logger.keys():
-                self.train_confidence_loss_dict_logger[k].update(
-                    confidence_loss_dict["loss_breakdown"][k].detach()
-                    if torch.is_tensor(confidence_loss_dict["loss_breakdown"][k])
-                    else confidence_loss_dict["loss_breakdown"][k]
-                )
+                if k in confidence_loss_dict["loss_breakdown"]:
+                    loss_val = confidence_loss_dict["loss_breakdown"][k]
+                    if torch.is_tensor(loss_val):
+                        self.train_confidence_loss_dict_logger[k].update(loss_val.detach())
+                    else:
+                        self.train_confidence_loss_dict_logger[k].update(loss_val)
+                        
         self.log("train/loss", loss)
         self.training_log()
         return loss
@@ -663,6 +700,42 @@ class Boltz1(LightningModule):
                 return
             else:
                 raise e
+        
+        # --- FIXED: Compute and update split Glycan Dihedral Validation Metrics ---
+        try:
+            dihedral_metrics = compute_glycan_dihedral_validation(
+                feats=batch,
+                pred_atom_coords=out["sample_atom_coords"],
+                true_atom_coords=true_coords,
+                multiplicity=n_samples,
+            )
+            # Unpack and update anomeric dihedral loss
+            anomeric_loss, anomeric_count = dihedral_metrics["anomeric"]
+            if anomeric_count > 0:
+                self.glycan_anomeric_dihedral_loss.update(anomeric_loss, weight=anomeric_count)
+
+            # Unpack and update ring dihedral loss
+            ring_loss, ring_count = dihedral_metrics["ring"]
+            if ring_count > 0:
+                self.glycan_ring_dihedral_loss.update(ring_loss, weight=ring_count)
+
+        except Exception as e:
+            # This is a non-critical metric, so we can log errors and continue
+            print(f"| WARNING: Glycan dihedral validation failed with error: {e}")
+
+        try:
+            glycan_rmsd, glycan_count = compute_rmsd_glycan(
+                feats=batch,
+                pred_atom_coords=out["sample_atom_coords"],
+                true_atom_coords=true_coords,
+                multiplicity=n_samples,
+            )
+            if glycan_count > 0:
+                self.rmsd_glycan.update(glycan_rmsd, weight=glycan_count)
+        except Exception as e:
+            # This is a non-critical metric, so we can log errors and continue
+            print(f"| WARNING: Glycan RMSD calculation failed with error: {e}")
+
         # if the multiplicity used is > 1 then we take the best lddt of the different samples
         # AF3 combines this with the confidence based filtering
         best_lddt_dict, best_total_dict = {}, {}
@@ -1124,6 +1197,31 @@ class Boltz1(LightningModule):
         )
         self.best_rmsd.reset()
 
+        self.log(
+            "val/rmsd_glycan",
+            self.rmsd_glycan.compute(),
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.rmsd_glycan.reset()
+
+        # --- FIXED: Log and reset the new split metrics ---
+        self.log(
+            "val/glycan_anomeric_dihedral_loss",
+            self.glycan_anomeric_dihedral_loss.compute(),
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.glycan_anomeric_dihedral_loss.reset()
+
+        self.log(
+            "val/glycan_ring_dihedral_loss",
+            self.glycan_ring_dihedral_loss.compute(),
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.glycan_ring_dihedral_loss.reset()
+
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         try:
             out = self(
@@ -1177,25 +1275,19 @@ class Boltz1(LightningModule):
 
     def configure_optimizers(self):
         """Configure the optimizer."""
-
-        if self.structure_prediction_training:
-            parameters = [p for p in self.parameters() if p.requires_grad]
-        else:
-            parameters = [
-                p for p in self.confidence_module.parameters() if p.requires_grad
-            ] + [
-                p
-                for p in self.structure_module.out_token_feat_update.parameters()
-                if p.requires_grad
-            ]
+        
+        # Gather all trainable parameters into a single standard group
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
 
         optimizer = torch.optim.Adam(
-            parameters,
+            trainable_params,
             betas=(self.training_args.adam_beta_1, self.training_args.adam_beta_2),
             eps=self.training_args.adam_eps,
             lr=self.training_args.base_lr,
         )
+
         if self.training_args.lr_scheduler == "af3":
+            # Use the standard imported AlphaFoldLRScheduler
             scheduler = AlphaFoldLRScheduler(
                 optimizer,
                 base_lr=self.training_args.base_lr,
@@ -1261,3 +1353,27 @@ class Boltz1(LightningModule):
 
     def on_test_start(self) -> None:
         self.prepare_eval()
+
+def detach_feats(feats: dict) -> dict:
+    """
+    Creates a shallow copy of the feats dictionary with all tensor values detached.
+    
+    This is crucial for isolating the computation graph of a subsequent module
+    (like the confidence model) from the main trunk's graph. It prevents DDP
+    errors when gradient checkpointing is used on modules that share dependencies
+    on tensors within the 'feats' dictionary.
+
+    Args:
+        feats: The input features dictionary, which may contain tensors still
+               attached to the computation graph.
+
+    Returns:
+        A new dictionary where all torch.Tensor values have been detached.
+    """
+    detached = {}
+    for k, v in feats.items():
+        if isinstance(v, torch.Tensor):
+            detached[k] = v.detach()
+        else:
+            detached[k] = v  # Keep non-tensor values (like lists, ints) as they are
+    return detached
