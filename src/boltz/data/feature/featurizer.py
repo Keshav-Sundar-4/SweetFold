@@ -1,6 +1,9 @@
 import math
 import random
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
+import sys
+import pkg_resources
+import json
 
 import numba
 import numpy as np
@@ -9,6 +12,7 @@ import torch
 from numba import types
 from torch import Tensor, from_numpy
 from torch.nn.functional import one_hot
+import torch.nn.functional as F
 
 from boltz.data import const
 from boltz.data.feature.pad import pad_dim
@@ -29,7 +33,6 @@ from boltz.model.modules.utils import center_random_augmentation
 ####################################################################################################
 # HELPERS
 ####################################################################################################
-
 
 def compute_frames_nonpolymer(
     data: Tokenized,
@@ -332,6 +335,7 @@ def construct_paired_msa(  # noqa: C901, PLR0915, PLR0912
     return msa_data, del_data, paired_data
 
 
+
 def prepare_msa_arrays(
     tokens,
     pairing: list[dict[int, int]],
@@ -402,25 +406,24 @@ def prepare_msa_arrays(
 
 deletions_dict_type = types.DictType(types.UniTuple(types.int64, 3), types.int64)
 
-
 @numba.njit(
     [
         types.Tuple(
             (
-                types.int64[:, ::1],  # msa_data
-                types.int64[:, ::1],  # del_data
-                types.int64[:, ::1],  # paired_data
+                types.int64[:, ::1],
+                types.int64[:, ::1],
+                types.int64[:, ::1],
             )
         )(
-            types.int64[::1],  # token_asym_ids
-            types.int64[::1],  # token_res_idxs
-            types.int64[::1],  # token_asym_ids_idx
-            types.int64[:, ::1],  # pairing
-            types.int64[:, ::1],  # is_paired
-            deletions_dict_type,  # deletions
-            types.int64[:, ::1],  # msa_sequences
-            types.int64[:, ::1],  # msa_residues
-            types.int64,  # gap_token
+            types.int64[::1],
+            types.int64[::1],
+            types.int64[::1],
+            types.int64[:, ::1],
+            types.int64[:, ::1],
+            deletions_dict_type,
+            types.int64[:, ::1],
+            types.int64[:, ::1],
+            types.int64,
         )
     ],
     cache=True,
@@ -464,6 +467,8 @@ def _prepare_msa_arrays_inner(
     return msa_data, del_data, paired_data
 
 
+
+
 ####################################################################################################
 # FEATURES
 ####################################################################################################
@@ -483,7 +488,6 @@ def select_subset_from_mask(mask, p):
     new_mask[selected_indices] = 1
 
     return new_mask
-
 
 def process_token_features(
     data: Tokenized,
@@ -552,7 +556,10 @@ def process_token_features(
     pocket_feature = (
         np.zeros(len(token_data)) + const.pocket_contact_info["UNSPECIFIED"]
     )
-    if inference_binder is not None:
+    
+    # FIX: Changed `if inference_binder is not None:` to `if inference_binder:`
+    # This ensures we skip this block if inference_binder is an empty list [].
+    if inference_binder:
         assert inference_pocket is not None
         pocket_residues = set(inference_pocket)
         for idx, token in enumerate(token_data):
@@ -668,8 +675,7 @@ def process_token_features(
         "cyclic_period": cyclic_period,
     }
     return token_features
-
-
+    
 def process_atom_features(
     data: Tokenized,
     atoms_per_window_queries: int = 32,
@@ -679,74 +685,82 @@ def process_atom_features(
     max_atoms: Optional[int] = None,
     max_tokens: Optional[int] = None,
 ) -> dict[str, Tensor]:
-    """Get the atom features.
-
-    Parameters
-    ----------
-    data : Tokenized
-        The tokenized data.
-    max_atoms : int, optional
-        The maximum number of atoms.
-
-    Returns
-    -------
-    dict[str, Tensor]
-        The atom features.
-
-    """
-    # Filter to tokens' atoms
+    """Get the atom features with v1's corrected mono-idx reconstruction + v2 bedrock."""
+    # Collect per-atom / per-token data
     atom_data = []
     ref_space_uid = []
     coord_data = []
     frame_data = []
     resolved_frame_data = []
     atom_to_token = []
-    token_to_rep_atom = []  # index on cropped atom table
+    token_to_rep_atom = []     # index on cropped atom table
     r_set_to_rep_atom = []
     disto_coords = []
     atom_idx = 0
 
+    # Track residue identity across tokens (keep outside loop; v2 behavior)
     chain_res_ids = {}
+
+    # We'll fill this as we enumerate atoms in token order.
+    new_atom_mono_idx_list = []
+
     for token_id, token in enumerate(data.tokens):
-        # Get the chain residue ids
+        # Map residue ids to a compact "space uid"
         chain_idx, res_id = token["asym_id"], token["res_idx"]
         chain = data.structure.chains[chain_idx]
 
         if (chain_idx, res_id) not in chain_res_ids:
-            new_idx = len(chain_res_ids)
-            chain_res_ids[(chain_idx, res_id)] = new_idx
+            new_uid = len(chain_res_ids)
+            chain_res_ids[(chain_idx, res_id)] = new_uid
         else:
-            new_idx = chain_res_ids[(chain_idx, res_id)]
+            new_uid = chain_res_ids[(chain_idx, res_id)]
 
-        # Map atoms to token indices
-        ref_space_uid.extend([new_idx] * token["atom_num"])
+        ref_space_uid.extend([new_uid] * token["atom_num"])
         atom_to_token.extend([token_id] * token["atom_num"])
 
-        # Add atom data
+        # Pull token's atoms
         start = token["atom_idx"]
         end = token["atom_idx"] + token["atom_num"]
         token_atoms = data.structure.atoms[start:end]
 
-        # Map token to representative atom
+        # Compute per-atom mono indices
+        atom_to_mono_idx_map = data.structure.atom_to_mono_idx_map
+        is_glycan_chain = (atom_to_mono_idx_map is not None) and (token["asym_id"] in atom_to_mono_idx_map)
+
+        if is_glycan_chain:
+            mono_idx_map_for_chain = atom_to_mono_idx_map[token["asym_id"]]
+            chain_start_atom_idx = data.structure.chains[token["asym_id"]]["atom_idx"]
+
+            # Iterate atoms in this token by local index to recover original global index
+            for local_idx_in_token, _atom in enumerate(token_atoms):
+                original_global_atom_idx = token["atom_idx"] + local_idx_in_token
+                local_atom_idx_in_glycan = original_global_atom_idx - chain_start_atom_idx
+                if 0 <= local_atom_idx_in_glycan < len(mono_idx_map_for_chain):
+                    mono_idx = mono_idx_map_for_chain[local_atom_idx_in_glycan]
+                    new_atom_mono_idx_list.append(mono_idx)
+                else:
+                    new_atom_mono_idx_list.append(-1)
+        else:
+            # Non-glycan chains get sentinel -1
+            new_atom_mono_idx_list.extend([-1] * len(token_atoms))
+
+        # Representative atoms for distogram / residue-center
         token_to_rep_atom.append(atom_idx + token["disto_idx"] - start)
-        if (chain["mol_type"] != const.chain_type_ids["NONPOLYMER"]) and token[
-            "resolved_mask"
-        ]:
+        
+        # FIX: Include glycan atoms in the Reference Set so pLDDT loss unmasks
+        if (chain["mol_type"] != const.chain_type_ids["NONPOLYMER"] or is_glycan_chain) and token["resolved_mask"]:
             r_set_to_rep_atom.append(atom_idx + token["center_idx"] - start)
 
-        # Get token coordinates
+        # Coordinates for this token
         token_coords = np.array([token_atoms["coords"]])
         coord_data.append(token_coords)
 
-        # Get frame data
+        # Frame indices and masks
         res_type = const.tokens[token["res_type"]]
-
         if token["atom_num"] < 3 or res_type in ["PAD", "UNK", "-"]:
             idx_frame_a, idx_frame_b, idx_frame_c = 0, 0, 0
             mask_frame = False
-        elif (token["mol_type"] == const.chain_type_ids["PROTEIN"]) and (
-            res_type in const.ref_atoms
-        ):
+        elif (token["mol_type"] == const.chain_type_ids["PROTEIN"]) and (res_type in const.ref_atoms):
             idx_frame_a, idx_frame_b, idx_frame_c = (
                 const.ref_atoms[res_type].index("N"),
                 const.ref_atoms[res_type].index("CA"),
@@ -757,10 +771,7 @@ def process_atom_features(
                 and token_atoms["is_present"][idx_frame_b]
                 and token_atoms["is_present"][idx_frame_c]
             )
-        elif (
-            token["mol_type"] == const.chain_type_ids["DNA"]
-            or token["mol_type"] == const.chain_type_ids["RNA"]
-        ) and (res_type in const.ref_atoms):
+        elif (token["mol_type"] == const.chain_type_ids["DNA"] or token["mol_type"] == const.chain_type_ids["RNA"]) and (res_type in const.ref_atoms):
             idx_frame_a, idx_frame_b, idx_frame_c = (
                 const.ref_atoms[res_type].index("C1'"),
                 const.ref_atoms[res_type].index("C3'"),
@@ -774,42 +785,39 @@ def process_atom_features(
         else:
             idx_frame_a, idx_frame_b, idx_frame_c = 0, 0, 0
             mask_frame = False
-        frame_data.append(
-            [idx_frame_a + atom_idx, idx_frame_b + atom_idx, idx_frame_c + atom_idx]
-        )
+
+        frame_data.append([idx_frame_a + atom_idx, idx_frame_b + atom_idx, idx_frame_c + atom_idx])
         resolved_frame_data.append(mask_frame)
 
-        # Get distogram coordinates
+        # Distogram centers (take the distogram rep atom in the original table)
         disto_coords_tok = data.structure.atoms[token["disto_idx"]]["coords"]
         disto_coords.append(disto_coords_tok)
 
-        # Update atom data. This is technically never used again (we rely on coord_data),
-        # but we update for consistency and to make sure the Atom object has valid, transformed coordinates.
+        # Append atom records and advance cursor
         token_atoms = token_atoms.copy()
-        token_atoms["coords"] = token_coords[0]  # atom has a copy of first coords
+        token_atoms["coords"] = token_coords[0]
         atom_data.append(token_atoms)
         atom_idx += len(token_atoms)
 
+    # --- Distogram over representative atoms ---
     disto_coords = np.array(disto_coords)
-
-    # Compute distogram
     t_center = torch.Tensor(disto_coords)
     t_dists = torch.cdist(t_center, t_center)
     boundaries = torch.linspace(min_dist, max_dist, num_bins - 1)
     distogram = (t_dists.unsqueeze(-1) > boundaries).sum(dim=-1).long()
     disto_target = one_hot(distogram, num_classes=num_bins)
 
+    # Concatenate per-token arrays
     atom_data = np.concatenate(atom_data)
     coord_data = np.concatenate(coord_data, axis=1)
     ref_space_uid = np.array(ref_space_uid)
 
-    # Compute features
+    # --- Featurization ---
     ref_atom_name_chars = from_numpy(atom_data["name"]).long()
+    ref_atom_name_raw = from_numpy(atom_data["name"].copy()) # For diagnostics
     ref_element = from_numpy(atom_data["element"]).long()
     ref_charge = from_numpy(atom_data["charge"])
-    ref_pos = from_numpy(
-        atom_data["conformer"].copy()
-    )  # not sure why I need to copy here..
+    ref_pos = from_numpy(atom_data["conformer"].copy())
     ref_space_uid = from_numpy(ref_space_uid)
     coords = from_numpy(coord_data.copy())
     resolved_mask = from_numpy(atom_data["is_present"])
@@ -817,66 +825,63 @@ def process_atom_features(
     atom_to_token = torch.tensor(atom_to_token, dtype=torch.long)
     token_to_rep_atom = torch.tensor(token_to_rep_atom, dtype=torch.long)
     r_set_to_rep_atom = torch.tensor(r_set_to_rep_atom, dtype=torch.long)
+
+    # Frames recomputation to cover non-polymers (v2 bedrock)
     frame_data, resolved_frame_data = compute_frames_nonpolymer(
-        data,
-        coord_data,
-        atom_data["is_present"],
-        atom_to_token,
-        frame_data,
-        resolved_frame_data,
-    )  # Compute frames for NONPOLYMER tokens
+        data, coord_data, atom_data["is_present"], atom_to_token, frame_data, resolved_frame_data
+    )
     frames = from_numpy(frame_data.copy())
     frame_resolved_mask = from_numpy(resolved_frame_data.copy())
-    # Convert to one-hot
-    ref_atom_name_chars = one_hot(
-        ref_atom_name_chars % num_bins, num_classes=num_bins
-    )  # added for lower case letters
+
+    # One-hot encodings
+    ref_atom_name_chars = one_hot(ref_atom_name_chars % num_bins, num_classes=num_bins)
     ref_element = one_hot(ref_element, num_classes=const.num_elements)
-    atom_to_token = one_hot(atom_to_token, num_classes=token_id + 1)
+    atom_to_token = one_hot(atom_to_token, num_classes=len(data.tokens))
     token_to_rep_atom = one_hot(token_to_rep_atom, num_classes=len(atom_data))
     r_set_to_rep_atom = one_hot(r_set_to_rep_atom, num_classes=len(atom_data))
 
-    # Center the ground truth coordinates
+    # Center coords by resolved atoms; augment inputs
     center = (coords * resolved_mask[None, :, None]).sum(dim=1)
     center = center / resolved_mask.sum().clamp(min=1)
     coords = coords - center[:, None]
+    ref_pos = center_random_augmentation(ref_pos[None], resolved_mask[None], centering=False)[0]
 
-    # Apply random roto-translation to the input atoms
-    ref_pos = center_random_augmentation(
-        ref_pos[None], resolved_mask[None], centering=False
-    )[0]
-
-    # Compute padding and apply
+    # --- Padding: atoms-first path (window multiple) ---
     if max_atoms is not None:
-        assert max_atoms % atoms_per_window_queries == 0
-        pad_len = max_atoms - len(atom_data)
+        pad_len_atoms = max_atoms - len(atom_data)
     else:
-        pad_len = (
-            (len(atom_data) - 1) // atoms_per_window_queries + 1
-        ) * atoms_per_window_queries - len(atom_data)
+        pad_len_atoms = ((len(atom_data) - 1) // atoms_per_window_queries + 1) * atoms_per_window_queries - len(atom_data)
 
-    if pad_len > 0:
-        pad_mask = pad_dim(pad_mask, 0, pad_len)
-        ref_pos = pad_dim(ref_pos, 0, pad_len)
-        resolved_mask = pad_dim(resolved_mask, 0, pad_len)
-        ref_element = pad_dim(ref_element, 0, pad_len)
-        ref_charge = pad_dim(ref_charge, 0, pad_len)
-        ref_atom_name_chars = pad_dim(ref_atom_name_chars, 0, pad_len)
-        ref_space_uid = pad_dim(ref_space_uid, 0, pad_len)
-        coords = pad_dim(coords, 1, pad_len)
-        atom_to_token = pad_dim(atom_to_token, 0, pad_len)
-        token_to_rep_atom = pad_dim(token_to_rep_atom, 1, pad_len)
-        r_set_to_rep_atom = pad_dim(r_set_to_rep_atom, 1, pad_len)
+    if pad_len_atoms > 0:
+        pad_mask = pad_dim(pad_mask, 0, pad_len_atoms)
+        ref_pos = pad_dim(ref_pos, 0, pad_len_atoms)
+        resolved_mask = pad_dim(resolved_mask, 0, pad_len_atoms)
+        ref_element = pad_dim(ref_element, 0, pad_len_atoms)
+        ref_charge = pad_dim(ref_charge, 0, pad_len_atoms)
+        ref_atom_name_chars = pad_dim(ref_atom_name_chars, 0, pad_len_atoms)
+        ref_atom_name_raw = pad_dim(ref_atom_name_raw, 0, pad_len_atoms) # Pad raw names
+        ref_space_uid = pad_dim(ref_space_uid, 0, pad_len_atoms)
+        coords = pad_dim(coords, 1, pad_len_atoms)
+        atom_to_token = pad_dim(atom_to_token, 0, pad_len_atoms)
+        token_to_rep_atom = pad_dim(token_to_rep_atom, 1, pad_len_atoms)
+        r_set_to_rep_atom = pad_dim(r_set_to_rep_atom, 1, pad_len_atoms)
 
+    # Finalize mono-idx + CONSISTENT padding
+    atom_mono_idx = from_numpy(np.array(new_atom_mono_idx_list, dtype=np.int64))
+    if pad_len_atoms > 0:
+        # Always pad to the same atom length, regardless of max_atoms vs window multiple
+        atom_mono_idx = pad_dim(atom_mono_idx, 0, pad_len_atoms, value=-1)
+
+    # --- Padding: tokens dimension (optional) ---
     if max_tokens is not None:
-        pad_len = max_tokens - token_to_rep_atom.shape[0]
-        if pad_len > 0:
-            atom_to_token = pad_dim(atom_to_token, 1, pad_len)
-            token_to_rep_atom = pad_dim(token_to_rep_atom, 0, pad_len)
-            r_set_to_rep_atom = pad_dim(r_set_to_rep_atom, 0, pad_len)
-            disto_target = pad_dim(pad_dim(disto_target, 0, pad_len), 1, pad_len)
-            frames = pad_dim(frames, 0, pad_len)
-            frame_resolved_mask = pad_dim(frame_resolved_mask, 0, pad_len)
+        pad_len_tokens = max_tokens - token_to_rep_atom.shape[0]
+        if pad_len_tokens > 0:
+            atom_to_token = pad_dim(atom_to_token, 1, pad_len_tokens)
+            token_to_rep_atom = pad_dim(token_to_rep_atom, 0, pad_len_tokens)
+            r_set_to_rep_atom = pad_dim(r_set_to_rep_atom, 0, pad_len_tokens)
+            disto_target = pad_dim(pad_dim(disto_target, 0, pad_len_tokens), 1, pad_len_tokens)
+            frames = pad_dim(frames, 0, pad_len_tokens)
+            frame_resolved_mask = pad_dim(frame_resolved_mask, 0, pad_len_tokens)
 
     return {
         "ref_pos": ref_pos,
@@ -884,8 +889,10 @@ def process_atom_features(
         "ref_element": ref_element,
         "ref_charge": ref_charge,
         "ref_atom_name_chars": ref_atom_name_chars,
+        "ref_atom_name_raw": ref_atom_name_raw, # For diagnostics
         "ref_space_uid": ref_space_uid,
         "coords": coords,
+        "atom_mono_idx": atom_mono_idx,         
         "atom_pad_mask": pad_mask,
         "atom_to_token": atom_to_token,
         "token_to_rep_atom": token_to_rep_atom,
@@ -894,7 +901,6 @@ def process_atom_features(
         "frames_idx": frames,
         "frame_resolved_mask": frame_resolved_mask,
     }
-
 
 def process_msa_features(
     data: Tokenized,
@@ -1123,107 +1129,341 @@ def process_chain_feature_constraints(
         "symmetric_chain_index": symmetric_chain_index,
     }
 
-
 class BoltzFeaturizer:
     """Boltz featurizer."""
 
     def process(
-        self,
-        data: Tokenized,
-        training: bool,
-        max_seqs: int = 4096,
-        atoms_per_window_queries: int = 32,
-        min_dist: float = 2.0,
-        max_dist: float = 22.0,
-        num_bins: int = 64,
-        max_tokens: Optional[int] = None,
-        max_atoms: Optional[int] = None,
-        pad_to_max_seqs: bool = False,
-        compute_symmetries: bool = False,
-        symmetries: Optional[dict] = None,
-        binder_pocket_conditioned_prop: Optional[float] = 0.0,
-        binder_pocket_cutoff: Optional[float] = 6.0,
-        binder_pocket_sampling_geometric_p: Optional[float] = 0.0,
-        only_ligand_binder_pocket: Optional[bool] = False,
-        inference_binder: Optional[int] = None,
-        inference_pocket: Optional[list[tuple[int, int]]] = None,
-        compute_constraint_features: bool = False,
-    ) -> dict[str, Tensor]:
-        """Compute features.
+            self,
+            data: Tokenized,
+            training: bool,
+            max_seqs: int = 4096,
+            atoms_per_window_queries: int = 32,
+            min_dist: float = 2.0,
+            max_dist: float = 22.0,
+            num_bins: int = 64,
+            max_tokens: Optional[int] = None,
+            max_atoms: Optional[int] = None,
+            pad_to_max_seqs: bool = False,
+            compute_symmetries: bool = False,
+            symmetries: Optional[dict] = None,
+            binder_pocket_conditioned_prop: Optional[float] = 0.0,
+            binder_pocket_cutoff: Optional[float] = 6.0,
+            binder_pocket_sampling_geometric_p: Optional[float] = 0.0,
+            only_ligand_binder_pocket: Optional[bool] = False,
+            inference_binder: Optional[int] = None,
+            inference_pocket: Optional[list[tuple[int, int]]] = None,
+            compute_constraint_features: bool = False,
+            max_mono_chains: int = 128,
+            compute_glycan_features: bool = True,
+        ) -> dict[str, Tensor]:
+            """Compute features."""
+            sites = data.structure.glycosylation_sites
+            if training and max_seqs is not None and max_seqs > 1:
+                max_seqs_batch = np.random.randint(1, max_seqs + 1)
+            else:
+                max_seqs_batch = max_seqs
 
-        Parameters
-        ----------
-        data : Tokenized
-            The tokenized data.
-        training : bool
-            Whether the model is in training mode.
-        max_tokens : int, optional
-            The maximum number of tokens.
-        max_atoms : int, optional
-            The maximum number of atoms
-        max_seqs : int, optional
-            The maximum number of sequences.
+            token_features = process_token_features(
+                data,
+                max_tokens,
+                binder_pocket_conditioned_prop,
+                binder_pocket_cutoff,
+                binder_pocket_sampling_geometric_p,
+                only_ligand_binder_pocket,
+                inference_binder=inference_binder,
+                inference_pocket=inference_pocket,
+            )
 
-        Returns
-        -------
-        dict[str, Tensor]
-            The features for model training.
+            atom_features = process_atom_features(
+                data,
+                atoms_per_window_queries,
+                min_dist,
+                max_dist,
+                num_bins,
+                max_atoms,
+                max_tokens,
+            )
 
-        """
-        # Compute random number of sequences
-        if training and max_seqs is not None:
-            max_seqs_batch = np.random.randint(1, max_seqs + 1)  # noqa: NPY002
+            msa_features = process_msa_features(
+                data,
+                max_seqs_batch,
+                max_seqs,
+                max_tokens,
+                pad_to_max_seqs,
+            )
+
+            symmetry_features = {}
+            if compute_symmetries:
+                symmetry_features = process_symmetry_features(data, symmetries)
+
+            residue_constraint_features = {}
+            chain_constraint_features = {}
+            if compute_constraint_features:
+                residue_constraint_features = process_residue_constraint_features(data)
+                chain_constraint_features = process_chain_feature_constraints(data)
+
+            monosaccharide_features = {}
+            if compute_glycan_features:
+                monosaccharide_features = process_monosaccharide_features(
+                    data=data,
+                    atom_features=atom_features,
+                    token_features=token_features,
+                    max_tokens=max_tokens,
+                    max_mono_chains=max_mono_chains,
+                )
+        
+            features =  {
+                **token_features,
+                **atom_features,
+                **msa_features,
+                **symmetry_features,
+                **residue_constraint_features,
+                **chain_constraint_features,
+                **monosaccharide_features,
+            }
+
+            features['raw_glycosylation_sites'] = _structured_sites_to_tensor(
+                data.structure.glycosylation_sites
+            )
+
+            return features
+
+def _get_default_mono_features(num_tokens: int, max_tokens: Optional[int], max_mono_chains: int) -> Dict[str, Tensor]:
+    """ Helper to return dictionary of zero tensors for monosaccharide features. """
+    # Assume necessary constants like NUM_MONO_TYPES are defined/imported globally
+    target_num_tokens = max_tokens if max_tokens is not None else num_tokens
+    if target_num_tokens < 0: target_num_tokens = 0 # Ensure non-negative
+
+    default_shape_token = (target_num_tokens,)
+    default_shape_adj = (max_mono_chains, max_mono_chains)
+
+    return {
+        "mono_type": torch.zeros(*default_shape_token, NUM_MONO_TYPES, dtype=torch.float32),
+        "mono_anomeric": torch.zeros(*default_shape_token, NUM_ANOMERIC_TYPES, dtype=torch.float32),
+        "is_monosaccharide": torch.zeros(*default_shape_token, 1, dtype=torch.float32),
+        "inter_glycan_mask": torch.zeros(default_shape_adj, dtype=torch.float32),
+        "token_to_mono_idx": torch.full(default_shape_token, -1, dtype=torch.long),
+    }
+
+def _structured_sites_to_tensor(sites_array: np.ndarray) -> torch.Tensor:
+    """
+    (Corrected Version 2)
+    Converts a structured NumPy array of glycosylation sites into a homogeneous
+    integer torch.Tensor. Accesses the glycan monosaccharide index using the
+    correct field name 'glycan_res_id'.
+
+    Args:
+        sites_array: A structured NumPy array with the GlycosylationSite dtype.
+
+    Returns:
+        A torch.Tensor of shape (num_sites, 12) and dtype torch.long.
+        The 12 columns are:
+        [p_chain, p_res, p_name(4), g_chain, g_mono, g_name(4)]
+    """
+    if sites_array is None or sites_array.size == 0:
+        return torch.empty((0, 12), dtype=torch.long)
+
+    numerical_sites_list = []
+    for site in sites_array:
+        p_name_str = str(site["protein_atom_name"]).strip()
+        g_name_str = str(site["glycan_atom_name"]).strip()
+
+        p_name_padded = p_name_str.ljust(4)
+        g_name_padded = g_name_str.ljust(4)
+
+        p_name_encoded = [ord(c) - 32 for c in p_name_padded[:4]]
+        g_name_encoded = [ord(c) - 32 for c in g_name_padded[:4]]
+
+        row = [
+            site["protein_chain_id"],
+            site["protein_res_id"],
+            *p_name_encoded,
+            site["glycan_chain_id"],
+            site["glycan_res_id"],
+            *g_name_encoded,
+        ]
+        numerical_sites_list.append(row)
+
+    return torch.tensor(numerical_sites_list, dtype=torch.long)
+
+
+def process_monosaccharide_features(
+    data: Tokenized,
+    atom_features: Dict[str, Tensor],
+    token_features: Dict[str, Tensor],
+    max_tokens: Optional[int] = None,
+    max_mono_chains: int = 128,
+) -> Dict[str, Tensor]:
+    """
+    (High-Performance Version)
+    Generates monosaccharide feature tensors based on the single-chain glycan model.
+    This vectorized implementation avoids Python loops for maximum efficiency.
+    """
+    num_input_tokens = len(data.tokens)
+    glycan_feature_map = data.structure.glycan_feature_map
+    
+    # Early exit if there are no tokens or no glycan data in the structure
+    if num_input_tokens == 0 or not glycan_feature_map:
+        return _get_default_mono_features(num_input_tokens, max_tokens, max_mono_chains)
+
+    # --- Step 1: Map atoms to local mono_idx, then to tokens. (Already vectorized) ---
+    atom_mono_idx = atom_features['atom_mono_idx']
+    atom_to_token_dense = atom_features['atom_to_token'].argmax(dim=1)
+    token_asym_id = token_features['asym_id']
+
+    token_mono_idx_local = torch.full((num_input_tokens,), -1, dtype=torch.long, device=atom_mono_idx.device)
+    valid_atom_mask = atom_mono_idx != -1
+    token_indices_to_update = atom_to_token_dense[valid_atom_mask]
+    mono_indices_to_assign = atom_mono_idx[valid_atom_mask]
+    token_mono_idx_local.scatter_(0, token_indices_to_update, mono_indices_to_assign)
+
+    # --- Step 2: Create a global index for all unique monosaccharides. (Fast) ---
+    unique_monos = sorted(list(set(
+        (asym.item(), mono_idx.item())
+        for asym, mono_idx in zip(token_asym_id, token_mono_idx_local) if mono_idx.item() != -1
+    )))
+
+    if not unique_monos:
+        return _get_default_mono_features(num_input_tokens, max_tokens, max_mono_chains)
+
+    mono_map = {mono: i for i, mono in enumerate(unique_monos)}
+    num_global_monos = len(unique_monos)
+
+    token_to_mono_idx = torch.tensor([
+        mono_map.get((asym.item(), mono_idx.item()), -1)
+        for asym, mono_idx in zip(token_asym_id, token_mono_idx_local)
+    ], dtype=torch.long, device=token_asym_id.device)
+
+    # --- Step 3: Create the inter-glycan mask. (Already vectorized) ---
+    mono_asym_ids = torch.tensor([mono[0] for mono in unique_monos], device=token_asym_id.device)
+    inter_glycan_mask = (mono_asym_ids.unsqueeze(1) == mono_asym_ids.unsqueeze(0)).float()
+
+    # --- Step 4: Build "Source of Truth" feature tensors for all unique monosaccharides. ---
+    mono_type_ids = []
+    anomeric_ids = []
+    
+    default_mono_type = MONO_TYPE_MAP.get("OTHER", 0)
+    default_anomeric = ANOMERIC_MAP.get(None, 2)
+
+    for asym_id, local_idx in unique_monos:
+        features = glycan_feature_map.get((asym_id, local_idx))
+        if features:
+            # FIX: Handle both dicts (from npz load) and dataclass objects
+            if isinstance(features, dict):
+                ccd_code = features.get('ccd_code', 'UNK').upper()
+                anomeric_config = features.get('anomeric_config', None)
+            else:
+                ccd_code = getattr(features, 'ccd_code', 'UNK').upper()
+                anomeric_config = getattr(features, 'anomeric_config', None)
+                
+            mono_type_ids.append(MONO_TYPE_MAP.get(ccd_code, default_mono_type))
+            anomeric_ids.append(ANOMERIC_MAP.get(anomeric_config, default_anomeric))
         else:
-            max_seqs_batch = max_seqs
+            mono_type_ids.append(default_mono_type)
+            anomeric_ids.append(default_anomeric)
 
-        # Compute token features
-        token_features = process_token_features(
-            data,
-            max_tokens,
-            binder_pocket_conditioned_prop,
-            binder_pocket_cutoff,
-            binder_pocket_sampling_geometric_p,
-            only_ligand_binder_pocket,
-            inference_binder=inference_binder,
-            inference_pocket=inference_pocket,
-        )
+    source_mono_type_ids = torch.tensor(mono_type_ids, dtype=torch.long, device=token_asym_id.device)
+    source_anomeric_ids = torch.tensor(anomeric_ids, dtype=torch.long, device=token_asym_id.device)
+    
+    # --- Step 5: Vectorized Feature Generation using advanced indexing (gather). ---
+    mono_type = torch.zeros(num_input_tokens, NUM_MONO_TYPES, dtype=torch.float32, device=token_asym_id.device)
+    mono_anomeric = torch.zeros(num_input_tokens, NUM_ANOMERIC_TYPES, dtype=torch.float32, device=token_asym_id.device)
+    
+    is_mono_mask = token_to_mono_idx != -1
+    valid_global_indices = token_to_mono_idx[is_mono_mask]
+    
+    gathered_type_ids = source_mono_type_ids[valid_global_indices]
+    gathered_anomeric_ids = source_anomeric_ids[valid_global_indices]
+    
+    one_hot_types = F.one_hot(gathered_type_ids, num_classes=NUM_MONO_TYPES).float()
+    one_hot_anomerics = F.one_hot(gathered_anomeric_ids, num_classes=NUM_ANOMERIC_TYPES).float()
+    
+    mono_type[is_mono_mask] = one_hot_types
+    mono_anomeric[is_mono_mask] = one_hot_anomerics
+    
+    is_monosaccharide = is_mono_mask.float().unsqueeze(-1)
+    
+    # --- Step 6: Pad tensors and finalize the output dictionary. ---
+    final_features = {
+        "token_to_mono_idx": token_to_mono_idx,
+        "mono_type": mono_type,
+        "mono_anomeric": mono_anomeric,
+        "is_monosaccharide": is_monosaccharide,
+    }
 
-        # Compute atom features
-        atom_features = process_atom_features(
-            data,
-            atoms_per_window_queries,
-            min_dist,
-            max_dist,
-            num_bins,
-            max_atoms,
-            max_tokens,
-        )
+    if max_tokens is not None:
+        pad_len = max_tokens - num_input_tokens
+        if pad_len > 0:
+            for key, tensor in final_features.items():
+                pad_val = -1 if key == "token_to_mono_idx" else 0
+                final_features[key] = pad_dim(tensor, 0, pad_len, value=pad_val)
+        elif pad_len < 0:
+             for key, tensor in final_features.items():
+                final_features[key] = tensor[:max_tokens]
 
-        # Compute MSA features
-        msa_features = process_msa_features(
-            data,
-            max_seqs_batch,
-            max_seqs,
-            max_tokens,
-            pad_to_max_seqs,
-        )
+    pad_len_mono = max_mono_chains - num_global_monos
+    if pad_len_mono > 0:
+        inter_glycan_mask = pad_dim(pad_dim(inter_glycan_mask, 0, pad_len_mono), 1, pad_len_mono)
+    elif pad_len_mono < 0:
+        inter_glycan_mask = inter_glycan_mask[:max_mono_chains, :max_mono_chains]
+    
+    final_features["inter_glycan_mask"] = inter_glycan_mask
+    
+    return final_features
 
-        # Compute symmetry features
-        symmetry_features = {}
-        if compute_symmetries:
-            symmetry_features = process_symmetry_features(data, symmetries)
 
-        # Compute residue constraint features
-        residue_constraint_features = {}
-        if compute_constraint_features:
-            residue_constraint_features = process_residue_constraint_features(data)
-            chain_constraint_features = process_chain_feature_constraints(data)
+#######################################################################################################
+#######################################################################################################
 
-        return {
-            **token_features,
-            **atom_features,
-            **msa_features,
-            **symmetry_features,
-            **residue_constraint_features,
-            **chain_constraint_features,
-        }
+# MONOSACCHARIDE MAPPINGS
+
+#######################################################################################################
+#######################################################################################################
+
+#MAX_MONO_CHAINS = 128 # Example: Maximum number of monosaccharide chains expected in a glycan
+
+
+# 2. Anomeric Configuration
+ANOMERIC_MAP: Dict[Optional[str], int] = {'a': 0, 'b': 1, None: 2}
+NUM_ANOMERIC_TYPES: int = len(ANOMERIC_MAP)
+
+
+# 1. Monosaccharide Type (Initial set: FRU, MAN, GLC + OTHER)
+MONO_TYPE_MAP: Dict[str, int] = {
+    "05L": 0,   "07E": 1,   "0HX": 2,   "0LP": 3,   "0MK": 4,   "0NZ": 5,   "0UB": 6,   "0WK": 7,   "0XY": 8,   "0YT": 9,   "12E": 10,  "145": 11,  "147": 12,  "149": 13,  "14T": 14,  "15L": 15,  "16F": 16,  "16G": 17,  "16O": 18,  "17T": 19,  "18D": 20,  "18O": 21,  "1CF": 22,  "1GL": 23,  "1GN": 24,  "1S3": 25,  "1S4": 26,  "1SD": 27,  "1X4": 28,  "20S": 29,  "20X": 30,
+    "22O": 31,  "22S": 32,  "23V": 33,  "24S": 34,  "25E": 35,  "26O": 36,  "27C": 37,  "289": 38,  "291": 39,  "293": 40,  "2DG": 41,  "2DR": 42,  "2F8": 43,  "2FG": 44,  "2FL": 45,  "2GL": 46,  "2GS": 47,  "2H5": 48,  "2M5": 49,  "2M8": 50,  "2WP": 51,  "32O": 52,  "34V": 53,  "38J": 54,  "3DO": 55,  "3FM": 56,  "3HD": 57,  "3J3": 58,  "3J4": 59,  "3LJ": 60,  "3MG": 61,
+    "3MK": 62,  "3R3": 63,  "3S6": 64,  "3YW": 65,  "42D": 66,  "445": 67,  "44S": 68,  "46Z": 69,  "475": 70,  "491": 71,  "49A": 72,  "49S": 73,  "49T": 74,  "49V": 75,  "4AM": 76,  "4CQ": 77,  "4GL": 78,  "4GP": 79,  "4JA": 80,  "4N2": 81,  "4NN": 82,  "4QY": 83,  "4R1": 84,  "4SG": 85,  "4U0": 86,  "4U1": 87,  "4U2": 88,  "4UZ": 89,  "4V5": 90,  "50A": 91,
+    "510": 92,  "51N": 93,  "56N": 94,  "57S": 95,  "5DI": 96,  "5GF": 97,  "5GO": 98,  "5KQ": 99,  "5KV": 100, "5L2": 101, "5L3": 102, "5LS": 103, "5LT": 104, "5N6": 105, "5QP": 106, "5TH": 107, "5TJ": 108, "5TK": 109, "5TM": 110, "604": 111, "61J": 112, "62I": 113, "64K": 114, "66O": 115, "6BG": 116,  "6C2": 117,  "6GB": 118,  "6GP": 119,  "6GR": 120,
+    "6K3": 121, "6KH": 122, "6KL": 123, "6KS": 124, "6KU": 125, "6KW": 126, "6LS": 127, "6LW": 128, "6MJ": 129, "6MN": 130, "6PY": 131, "6PZ": 132, "6S2": 133, "6UD": 134, "6Y6": 135, "6YR": 136, "6ZC": 137, "73E": 138, "79J": 139, "7CV": 140, "7D1": 141, "7GP": 142, "7JZ": 143, "7K2": 144, "7K3": 145, "7NU": 146, "83Y": 147, "89Y": 148, "8B7": 149, "8B9": 150, "8EX": 151, "8GA": 152,
+    "8GG": 153, "8GP": 154, "8LM": 155, "8LR": 156, "8OQ": 157, "8PK": 158, "8S0": 159, "95Z": 160, "96O": 161, "9AM": 162, "9C1": 163, "9CD": 164, "9GP": 165, "9KJ": 166, "9MR": 167, "9OK": 168, "9PG": 169, "9QG": 170, "9QZ": 171, "9S7": 172, "9SG": 173, "9SJ": 174, "9SM": 175, "9SP": 176, "9T1": 177, "9T7": 178, "9VP": 179, "9WJ": 180, "9WN": 181, "9WZ": 182, "9YW": 183,
+    "A0K": 184, "A1Q": 185, "A2G": 186, "A5C": 187, "A6P": 188, "AAL": 189, "ABD": 190, "ABE": 191, "ABF": 192, "ABL": 193, "AC1": 194, "ACR": 195, "ACX": 196, "ADA": 197, "AF1": 198, "AFD": 199, "AFO": 200, "AFP": 201, "AFR": 202, "AGL": 203, "AGR": 204, "AH2": 205, "AH8": 206, "AHG": 207, "AHM": 208, "AHR": 209, "AIG": 210, "ALL": 211, "ALX": 212, "AMG": 213, "AMN": 214, "AMU": 215,
+    "AMV": 216, "ANA": 217, "AOG": 218, "AQA": 219, "ARA": 220, "ARB": 221, "ARI": 222, "ARW": 223, "ASC": 224, "ASG": 225, "ASO": 226, "AXP": 227, "AXR": 228, "AY9": 229, "AZC": 230, "B0D": 231, "B16": 232, "B1H": 233, "B1N": 234, "B6D": 235, "B7G": 236, "B8D": 237, "B9D": 238, "BBK": 239, "BBV": 240, "BCD": 241, "BCW": 242, "BDF": 243, "BDG": 244, "BDP": 245, "BDR": 246, "BDZ": 247,
+    "BEM": 248, "BFN": 249, "BG6": 250, "BG8": 251, "BGC": 252, "BGL": 253, "BGN": 254, "BGP": 255, "BGS": 256, "BHG": 257, "BM3": 258, "BM7": 259, "BMA": 260, "BMX": 261, "BND": 262, "BNG": 263, "BNX": 264, "BO1": 265, "BOG": 266, "BQY": 267, "BS7": 268, "BTG": 269, "BTU": 270, "BWG": 271, "BXF": 272, "BXX": 273, "BXY": 274, "BZD": 275,
+    "C3B": 276, "C3G": 277, "C3X": 278, "C4B": 279, "C4W": 280, "C5X": 281, "CBF": 282, "CBI": 283, "CBK": 284, "CDR": 285, "CE5": 286, "CE6": 287, "CE8": 288, "CEG": 289, "CEX": 290, "CEY": 291, "CEZ": 292, "CGF": 293, "CJB": 294, "CKB": 295, "CKP": 296, "CNP": 297, "CR1": 298, "CR6": 299, "CRA": 300, "CT3": 301, "CTO": 302, "CTR": 303, "CTT": 304,
+    "D0N": 305, "D1M": 306, "D5E": 307, "D6G": 308, "DAF": 309, "DAG": 310, "DAN": 311, "DDA": 312, "DDL": 313, "DEG": 314, "DEL": 315, "DFR": 316, "DFX": 317, "DGO": 318, "DGS": 319, "DJB": 320, "DJE": 321, "DK4": 322, "DKX": 323, "DKZ": 324, "DL6": 325, "DLD": 326, "DLF": 327, "DLG": 328, "DO8": 329, "DOM": 330, "DPC": 331, "DQR": 332, "DR2": 333, "DR3": 334, "DR5": 335,
+    "DRI": 336, "DSR": 337, "DT6": 338, "DVC": 339, "DYM": 340, "E3M": 341, "E5G": 342, "EAG": 343, "EBG": 344, "EBQ": 345, "EEN": 346, "EEQ": 347, "EGA": 348, "EMP": 349, "EMZ": 350, "EPG": 351, "EQP": 352, "EQV": 353, "ERE": 354, "ERI": 355, "ETT": 356, "F1P": 357, "F1X": 358, "F55": 359, "F58": 360, "F6P": 361, "FBP": 362, "FCA": 363, "FCB": 364, "FCT": 365, "FDP": 366,
+    "FDQ": 367, "FFC": 368, "FFX": 369, "FIF": 370, "FK9": 371, "FKD": 372, "FMF": 373, "FMO": 374, "FNG": 375, "FNY": 376, "FRU": 377, "FSA": 378, "FSI": 379, "FSM": 380, "FSR": 381, "FSW": 382, "FUB": 383, "FUC": 384, "FUF": 385, "FUL": 386, "FUY": 387, "FVQ": 388, "FX1": 389, "FYJ": 390, "G0S": 391, "G16": 392, "G1P": 393, "G20": 394, "G28": 395, "G2F": 396,
+    "G3F": 397, "G4D": 398, "G4S": 399, "G6D": 400, "G6P": 401, "G6S": 402, "G7P": 403, "G8Z": 404, "GAA": 405, "GAC": 406, "GAD": 407, "GAF": 408, "GAL": 409, "GAT": 410, "GBH": 411, "GC1": 412, "GC4": 413, "GC9": 414, "GCB": 415, "GCD": 416, "GCN": 417, "GCO": 418, "GCS": 419, "GCT": 420, "GCU": 421, "GCV": 422, "GCW": 423, "GDA": 424, "GDL": 425,
+    "GE1": 426, "GE3": 427, "GFP": 428, "GIV": 429, "GL0": 430, "GL1": 431, "GL2": 432, "GL4": 433, "GL5": 434, "GL6": 435, "GL7": 436, "GL9": 437, "GLA": 438, "GLC": 439, "GLD": 440, "GLF": 441, "GLG": 442, "GLO": 443, "GLP": 444, "GLS": 445, "GLT": 446, "GM0": 447, "GMB": 448, "GMH": 449, "GMT": 450, "GMZ": 451, "GN1": 452, "GN4": 453, "GNS": 454, "GNX": 455,
+    "GP0": 456, "GP1": 457, "GP4": 458, "GPH": 459, "GPK": 460, "GPM": 461, "GPO": 462, "GPQ": 463, "GPU": 464, "GPV": 465, "GPW": 466, "GQ1": 467, "GRF": 468, "GRX": 469, "GS1": 470, "GS9": 471, "GTK": 472, "GTM": 473, "GTR": 474, "GU0": 475, "GU1": 476, "GU2": 477, "GU3": 478, "GU4": 479, "GU5": 480, "GU6": 481, "GU8": 482, "GU9": 483, "GUF": 484, "GUL": 485, "GUP": 486,
+    "GUZ": 487, "GXL": 488, "GYE": 489, "GYG": 490, "GYP": 491, "GYU": 492, "GYV": 493, "GZL": 494, "H1M": 495, "H1S": 496, "H2P": 497, "H53": 498, "H6Q": 499, "H6Z": 500, "HBZ": 501, "HD4": 502, "HNV": 503, "HNW": 504, "HSG": 505, "HSH": 506, "HSJ": 507, "HSQ": 508, "HSX": 509, "HSY": 510, "HTG": 511, "HTM": 512, "I57": 513, "IAB": 514, "IDC": 515, "IDF": 516, "IDG": 517, "IDR": 518, 
+    "IDS": 519, "IDU": 520, "IDX": 521, "IDY": 522, "IEM": 523, "IN1": 524, "IPT": 525, "ISD": 526, "ISL": 527, "ISX": 528, "IXD": 529, "J5B": 530, "JFZ": 531, "JHM": 532, "JLT": 533, "JS2": 534, "JV4": 535, "JVA": 536, "JVS": 537, "JZR": 538, "K5B": 539, "K99": 540, "KBA": 541, "KBG": 542, "KD5": 543, "KDA": 544, "KDB": 545, "KDD": 546, "KDE": 547, "KDF": 548, "KDM": 549, "KDN": 550, 
+    "KDO": 551, "KDR": 552, "KFN": 553, "KG1": 554, "KGM": 555, "KHP": 556, "KME": 557, "KO1": 558, "KO2": 559, "KOT": 560, "KTU": 561,
+    "L1L": 562, "L6S": 563, "LAH": 564, "LAK": 565, "LAO": 566, "LAT": 567, "LB2": 568, "LBS": 569, "LBT": 570, "LCN": 571, "LDY": 572, "LEC": 573, "LFR": 574, "LGC": 575, "LGU": 576, "LKA": 577, "LKS": 578, "LNV": 579, "LOG": 580, "LOX": 581, "LRH": 582, "LVO": 583, "LVZ": 584, "LXB": 585, "LXC": 586, "LXZ": 587, "LZ0": 588, "M1F": 589, "M1P": 590, "M2F": 591, "M3N": 592, "M55": 593, "M6D": 594, 
+    "M6P": 595, "M7B": 596, "M7P": 597, "M8C": 598, "MA1": 599, "MA2": 600, "MA3": 601, "MA8": 602, "MAF": 603, "MAG": 604, "MAL": 605, "MAN": 606, "MAT": 607, "MAV": 608, "MAW": 609, "MBE": 610, "MBF": 611, "MBG": 612, "MCU": 613, "MDA": 614, "MDP": 615, "MFB": 616, "MFU": 617, "MG5": 618, "MGC": 619, "MGL": 620, "MGS": 621, "MJJ": 622, "MLB": 623, "MLR": 624, "MMA": 625, "MN0": 626, 
+    "MNA": 627, "MQG": 628, "MQT": 629, "MRH": 630, "MRP": 631,"MSX": 632, "MTT": 633, "MUB": 634, "MUR": 635, "MVP": 636, "MXY": 637, "MXZ": 638, "MYG": 639, "N1L": 640, "N9S": 641, "NA1": 642, "NAA": 643, "NAG": 644, "NBG": 645, "NBX": 646, "NBY": 647, "NDG": 648, "NFG": 649, "NG1": 650, "NG6": 651, "NGA": 652, "NGC": 653, "NGE": 654, "NGK": 655, "NGR": 656, "NGS": 657, "NGY": 658, "NGZ": 659, "NHF": 660, 
+    "NLC": 661, "NM6": 662, "NM9": 663, "NNG": 664, "NPF": 665, "NSQ": 666, "NT1": 667, "NTF": 668, "NTO": 669, "NTP": 670, "NXD": 671, "NYT": 672,
+    "O1G": 673, "OAK": 674, "OEL": 675, "OI7": 676, "OPM": 677, "OSU": 678, "OTG": 679, "OTN": 680, "OTU": 681, "OX2": 682, "P53": 683, "P6P": 684, "PA1": 685, "PAV": 686, "PDX": 687, "PH5": 688, "PKM": 689, "PNA": 690, "PNG": 691, "PNJ": 692, "PNW": 693, "PPC": 694, "PRP": 695, "PSG": 696, "PSV": 697, "PUF": 698, "PZU": 699, "QIF": 700, "QKH": 701, "QPS": 702, "R1P": 703, "R1X": 704, "R2B": 705, "R2G": 706,
+    "RAE": 707, "RAF": 708, "RAM": 709, "RAO": 710, "RCD": 711, "RER": 712, "RF5": 713, "RGG": 714, "RHA": 715, "RHC": 716, "RI2": 717, "RIB": 718, "RIP": 719, "RM4": 720, "RP3": 721, "RP5": 722, "RP6": 723, "RR7": 724, "RRJ": 725, "RRY": 726, "RST": 727, "RTG": 728, "RTV": 729, "RUG": 730, "RUU": 731, "RV7": 732, "RVG": 733, "RVM": 734, "RWI": 735, "RY7": 736, "RZM": 737, "S7P": 738, "S81": 739,
+     "SA0": 740, "SCG": 741, "SCR": 742, "SDY": 743, "SEJ": 744, "SF6": 745, "SF9": 746, 
+    "SFJ": 747, "SFU": 748, "SG4": 749, "SG5": 750, "SG6": 751, "SG7": 752, "SGA": 753, "SGC": 754, "SGD": 755, "SGN": 756, "SHB": 757, "SHD": 758, "SHG": 759, "SIA": 760, "SID": 761, "SIO": 762, "SIZ": 763, "SLB": 764, "SLM": 765, "SLT": 766, "SMD": 767, "SN5": 768, "SNG": 769, "SOE": 770, "SOG": 771, 
+    "SOR": 772, "SR1": 773, "SSG": 774, "STZ": 775, "SUC": 776, "SUP": 777, "SUS": 778, "SWE": 779, "SZZ": 780, "T68": 781, "T6P": 782, "T6T": 783, "TA6": 784, "TCB": 785, "TCG": 786, "TDG": 787, "TEU": 788, "TF0": 789, "TFU": 790, "TGA": 791, "TGK": 792, "TGR": 793, "TGY": 794, "TH1": 795, "TMR": 796, 
+    "TMX": 797, "TNX": 798, "TOA": 799, "TOC": 800, "TQY": 801, "TRE": 802, "TRV": 803, "TS8": 804, "TT7": 805, "TTV": 806, "TTZ": 807, "TU4": 808, "TUG": 809, "TUJ": 810, "TUP": 811, "TUR": 812, "TVD": 813, "TVG": 814, "TVM": 815, "TVS": 816, "TVV": 817, "TVY": 818, "TW7": 819, "TWA": 820, "TWD": 821, "TWG": 822, "TWJ": 823, "TWY": 824, "TXB": 825, "TYV": 826,
+    "U1Y": 827, "U2A": 828, "U2D": 829, "U63": 830, "U8V": 831, "U97": 832, "U9A": 833, "U9D": 834, "U9G": 835, "U9J": 836, "U9M": 837, "UAP": 838, "UCD": 839, "UDC": 840, "UEA": 841, "V3M": 842, "V3P": 843, "V71": 844, "VG1": 845, "VTB": 846, "W9T": 847, "WIA": 848, "WOO": 849, "WUN": 850, "X0X": 851, "X1P": 852, "X1X": 853, "X2F": 854, "X6X": 855, "XDX": 856, "XGP": 857, 
+    "XIL": 858, "XLF": 859, "XLS": 860, "XMM": 861, "XXM": 862, "XXR": 863, "XXX": 864, "XYF": 865, "XYL": 866, "XYP": 867, "XYS": 868, "XYT": 869, "XYZ": 870, "YIO": 871, "YJM": 872, "YKR": 873, "YO5": 874, "YX0": 875, "YX1": 876, "YYB": 877, "YYH": 878, "YYJ": 879, "YYK": 880, "YYM": 881, "YYQ": 882, "YZ0": 883, "Z0F": 884, "Z15": 885, "Z16": 886, "Z2D": 887, "Z2T": 888, "Z3K": 889, "Z3L": 890, "Z3Q": 891, "Z3U": 892, 
+    "Z4K": 893, "Z4R": 894, "Z4S": 895, "Z4U": 896, "Z4V": 897, "Z4W": 898, "Z4Y": 899, "Z57": 900, "Z5J": 901, "Z5L": 902, "Z61": 903, "Z6H": 904, "Z6J": 905, "Z6W": 906, "Z8H": 907, "Z8T": 908, "Z9D": 909, "Z9E": 910, "Z9H": 911, "Z9K": 912, "Z9L": 913, "Z9M": 914, "Z9N": 915, "Z9W": 916, "ZB0": 917, "ZB1": 918, "ZB2": 919, "ZB3": 920, "ZCD": 921, "ZCZ": 922, "ZD0": 923, "ZDC": 924, "ZDO": 925, "ZEE": 926, "ZEL": 927, "ZGE": 928, "ZMR": 929,
+    "OTHER": 930
+}
+
+
+NUM_MONO_TYPES: int = len(MONO_TYPE_MAP)
