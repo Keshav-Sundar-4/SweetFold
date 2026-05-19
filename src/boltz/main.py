@@ -65,6 +65,13 @@ class MSAModuleArgs:
     offload_to_cpu: bool = False
     use_trifast: bool = True
 
+@dataclass
+class GlycanBiasArgs:
+    """
+    Top-level configuration for the Glycan Bias feature.
+    """
+    # The master switch to enable or disable the entire feature.
+    enabled: bool = True
 
 @dataclass
 class BoltzDiffusionParams:
@@ -321,8 +328,8 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
 
     Returns
     -------
-    BoltzProcessedInput
-        The processed input data.
+    None
+        This function writes files to disk and does not return a value.
 
     """
     click.echo("Processing input data.")
@@ -342,17 +349,20 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
 
         # Check how many examples need to be processed
         missing = len(input_ids) - len(processed_ids)
-        if not missing:
-            click.echo("All examples in data are processed. Updating the manifest")
-            # Dump updated manifest
+        if missing > 0:
+            click.echo(f"{missing} missing ids. Preprocessing these ids")
+            missing_ids = list(set(input_ids).difference(set(processed_ids)))
+            data = [d for d in data if d.stem in missing_ids]
+            assert len(data) == len(missing_ids)
+        else:
+            # If nothing is missing, we can still update the manifest in case
+            # the input list was a subset of the already processed files.
+            click.echo("All examples in data are already processed. Updating manifest.")
             updated_manifest = Manifest(existing_records)
-            updated_manifest.dump(out_dir / "processed" / "manifest.json")
-            return
-
-        click.echo(f"{missing} missing ids. Preprocessing these ids")
-        missing_ids = list(set(input_ids).difference(set(processed_ids)))
-        data = [d for d in data if d.stem in missing_ids]
-        assert len(data) == len(missing_ids)
+            updated_manifest.dump(manifest_path)
+            # No new data to process, so we can exit.
+            if not missing:
+                 return
 
     # Create output directories
     msa_dir = out_dir / "msa"
@@ -381,9 +391,9 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
         try:
             # Parse data
             if path.suffix in (".fa", ".fas", ".fasta"):
-                target = parse_fasta(path, ccd)
+                parsed_output = parse_fasta(path, ccd)
             elif path.suffix in (".yml", ".yaml"):
-                target = parse_yaml(path, ccd)
+                parsed_output = parse_yaml(path, ccd)
             elif path.is_dir():
                 msg = f"Found directory {path} instead of .fasta or .yaml, skipping."
                 raise RuntimeError(msg)
@@ -393,6 +403,15 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                     "please provide a .fasta or .yaml file."
                 )
                 raise RuntimeError(msg)
+
+            # --- START OF CORRECTION ---
+            # Handle parsers that may return a tuple (e.g., Target, metadata)
+            # This ensures `target` is always the Target object we expect.
+            if isinstance(parsed_output, tuple):
+                target = parsed_output[0]
+            else:
+                target = parsed_output
+            # --- END OF CORRECTION ---
 
             # Get target id
             target_id = target.record.id
@@ -467,11 +486,13 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
 
             # Dump structure
             struct_path = structure_dir / f"{target.record.id}.npz"
+            # Note: The glycan data is already inside target.structure and will be saved here.
             target.structure.dump(struct_path)
 
             # Dump constraints
-            constraints_path = processed_constraints_dir / f"{target.record.id}.npz"
-            target.residue_constraints.dump(constraints_path)
+            if target.residue_constraints:
+                constraints_path = processed_constraints_dir / f"{target.record.id}.npz"
+                target.residue_constraints.dump(constraints_path)
 
         except Exception as e:
             if len(data) > 1:
@@ -732,6 +753,13 @@ def predict(
         steering_args.fk_steering = False
         steering_args.guidance_update = False
 
+    # Initialize glycan bias arguments unconditionally
+    glycan_params = GlycanBiasArgs()
+    glycan_bias_args = {
+        "enabled": True,
+        "params": {"pairwise_bias_head_args": asdict(glycan_params)},
+    }
+
     model_module: Boltz1 = Boltz1.load_from_checkpoint(
         checkpoint,
         strict=True,
@@ -742,6 +770,7 @@ def predict(
         pairformer_args=asdict(pairformer_args),
         msa_module_args=asdict(msa_module_args),
         steering_args=asdict(steering_args),
+        glycan_bias_args=glycan_bias_args,
     )
     model_module.eval()
 
@@ -767,6 +796,7 @@ def predict(
         datamodule=data_module,
         return_predictions=False,
     )
+
 
 
 if __name__ == "__main__":
