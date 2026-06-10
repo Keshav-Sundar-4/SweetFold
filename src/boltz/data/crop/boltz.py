@@ -1,5 +1,6 @@
 from dataclasses import replace
 from typing import Optional
+import sys
 
 import numpy as np
 from scipy.spatial.distance import cdist
@@ -147,106 +148,80 @@ class BoltzCropper(Cropper):
         sizes = list(range(min_neighborhood, max_neighborhood + 1, 2))
         self.neighborhood_sizes = sizes
 
-    def crop(  # noqa: PLR0915
+    def crop(
         self,
         data: Tokenized,
         max_tokens: int,
         random: np.random.RandomState,
         max_atoms: Optional[int] = None,
-        chain_id: Optional[int] = None,
-        interface_id: Optional[int] = None,
+        chain_id: Optional[int] = None,  # Kept for compatibility
+        interface_id: Optional[int] = None,  # Kept for compatibility
+        record_id: str = "Unknown",
     ) -> Tokenized:
-        """Crop the data to a maximum number of tokens.
-
-        Parameters
-        ----------
-        data : Tokenized
-            The tokenized data.
-        max_tokens : int
-            The maximum number of tokens to crop.
-        random : np.random.RandomState
-            The random state for reproducibility.
-        max_atoms : int, optional
-            The maximum number of atoms to consider.
-        chain_id : int, optional
-            The chain ID to crop.
-        interface_id : int, optional
-            The interface ID to crop.
-
-        Returns
-        -------
-        Tokenized
-            The cropped data.
-
         """
-        # Check inputs
-        if chain_id is not None and interface_id is not None:
-            msg = "Only one of chain_id or interface_id can be provided."
+        Crops the data using a spatial expansion centered on a glycan, if present.
+        Utilizes the robust token/atom dual-recognition expansion loop from base Boltz.
+        """
+        # --- PRE-CROP DIAGNOSTIC SUMMARY ---
+        pre_tokens = data.tokens
+        pre_protein_mask = pre_tokens["mol_type"] == const.chain_type_ids["PROTEIN"]
+        pre_glycan_mask = pre_tokens["mol_type"] == const.chain_type_ids["NONPOLYMER"]
+        
+        pre_num_prot_chains = len(np.unique(pre_tokens[pre_protein_mask]["asym_id"])) if np.any(pre_protein_mask) else 0
+        pre_num_glyc_chains = len(np.unique(pre_tokens[pre_glycan_mask]["asym_id"])) if np.any(pre_glycan_mask) else 0
+        pre_num_sites = len(data.structure.glycosylation_sites) if data.structure.glycosylation_sites is not None else 0
+        
+        print(f"[{record_id}] Pre-Crop Summary: {pre_num_prot_chains} P, {pre_num_glyc_chains} G, {pre_num_sites} S.", flush=True)
+
+        token_data = data.tokens
+
+        # Early Exit Safeguard: Ensure BOTH tokens and atoms fit within bounds before skipping
+        total_atoms_in_struct = np.sum(token_data["atom_num"])
+        if len(token_data) <= max_tokens and (max_atoms is None or total_atoms_in_struct <= max_atoms):
+            print(f"[{record_id}] Post-Crop Summary (No Crop): {pre_num_prot_chains} P, {pre_num_glyc_chains} G, {pre_num_sites} S.", flush=True)
+            return data
+
+        valid_tokens = token_data[token_data["resolved_mask"]]
+        if not valid_tokens.size:
+            msg = "No valid (resolved) tokens in structure to perform cropping."
             raise ValueError(msg)
 
-        # Randomly select a neighborhood size
+        # --- Step 1: Select a Query Token (Epicenter), Prioritizing Glycans ---
+        resolved_glycan_tokens = valid_tokens[
+            valid_tokens["mol_type"] == const.chain_type_ids["NONPOLYMER"]
+        ]
+
+        if resolved_glycan_tokens.size > 0:
+            glycan_chain_ids = np.unique(resolved_glycan_tokens["asym_id"])
+            chosen_chain_id = random.choice(glycan_chain_ids)
+            tokens_from_chosen_glycan = resolved_glycan_tokens[
+                resolved_glycan_tokens["asym_id"] == chosen_chain_id
+            ]
+            query_token = pick_random_token(tokens_from_chosen_glycan, random)
+        else:
+            query_token = pick_random_token(valid_tokens, random)
+
+        # --- Step 2: Spatially Sort All Other Tokens ---
+        dists = valid_tokens["center_coords"] - query_token["center_coords"]
+        spatially_sorted_indices = np.argsort(np.linalg.norm(dists, axis=1))
+
+        # --- Step 3: Granular Spatial Expansion (Dual Recognition) ---
+        cropped_indices: set[int] = set()
+        total_atoms = 0
         neighborhood_size = random.choice(self.neighborhood_sizes)
 
-        # Get token data
-        token_data = data.tokens
-        token_bonds = data.bonds
-        mask = data.structure.mask
-        chains = data.structure.chains
-        interfaces = data.structure.interfaces
-
-        # Filter to valid chains
-        valid_chains = chains[mask]
-
-        # Filter to valid interfaces
-        valid_interfaces = interfaces
-        valid_interfaces = valid_interfaces[mask[valid_interfaces["chain_1"]]]
-        valid_interfaces = valid_interfaces[mask[valid_interfaces["chain_2"]]]
-
-        # Filter to resolved tokens
-        valid_tokens = token_data[token_data["resolved_mask"]]
-
-        # Check if we have any valid tokens
-        if not valid_tokens.size:
-            msg = "No valid tokens in structure"
-            raise ValueError(msg)
-
-        # Pick a random token, chain, or interface
-        if chain_id is not None:
-            query = pick_chain_token(valid_tokens, chain_id, random)
-        elif interface_id is not None:
-            interface = interfaces[interface_id]
-            query = pick_interface_token(valid_tokens, interface, random)
-        elif valid_interfaces.size:
-            idx = random.randint(len(valid_interfaces))
-            interface = valid_interfaces[idx]
-            query = pick_interface_token(valid_tokens, interface, random)
-        else:
-            idx = random.randint(len(valid_chains))
-            chain_id = valid_chains[idx]["asym_id"]
-            query = pick_chain_token(valid_tokens, chain_id, random)
-
-        # Sort all tokens by distance to query_coords
-        dists = valid_tokens["center_coords"] - query["center_coords"]
-        indices = np.argsort(np.linalg.norm(dists, axis=1))
-
-        # Select cropped indices
-        cropped: set[int] = set()
-        total_atoms = 0
-        for idx in indices:
-            # Get the token
+        for idx in spatially_sorted_indices:
             token = valid_tokens[idx]
+            
+            if token["token_idx"] in cropped_indices:
+                continue
 
-            # Get all tokens from this chain
             chain_tokens = token_data[token_data["asym_id"] == token["asym_id"]]
 
-            # Pick the whole chain if possible, otherwise select
-            # a contiguous subset centered at the query token
+            # Pick the whole chain if possible, otherwise expand outward symmetrically
             if len(chain_tokens) <= neighborhood_size:
                 new_tokens = chain_tokens
             else:
-                # First limit to the maximum set of tokens, with the
-                # neighboorhood on both sides to handle edges. This
-                # is mostly for efficiency with the while loop below.
                 min_idx = token["res_idx"] - neighborhood_size
                 max_idx = token["res_idx"] + neighborhood_size
 
@@ -254,13 +229,10 @@ class BoltzCropper(Cropper):
                 max_token_set = max_token_set[max_token_set["res_idx"] >= min_idx]
                 max_token_set = max_token_set[max_token_set["res_idx"] <= max_idx]
 
-                # Start by adding just the query token
+                # Start with just the token itself
                 new_tokens = max_token_set[max_token_set["res_idx"] == token["res_idx"]]
 
-                # Expand the neighborhood until we have enough tokens, one
-                # by one to handle some edge cases with non-standard chains.
-                # We switch to the res_idx instead of the token_idx to always
-                # include all tokens from modified residues or from ligands.
+                # Expand the neighborhood one-by-one
                 min_idx = max_idx = token["res_idx"]
                 while new_tokens.size < neighborhood_size:
                     min_idx = min_idx - 1
@@ -270,27 +242,67 @@ class BoltzCropper(Cropper):
                     new_tokens = new_tokens[new_tokens["res_idx"] <= max_idx]
 
             # Compute new tokens and new atoms
-            new_indices = set(new_tokens["token_idx"]) - cropped
-            new_tokens = token_data[list(new_indices)]
-            new_atoms = np.sum(new_tokens["atom_num"])
+            new_indices_to_add = set(new_tokens["token_idx"]) - cropped_indices
+            
+            if not new_indices_to_add:
+                continue
 
-            # Stop if we exceed the max number of tokens or atoms
-            if (len(new_indices) > (max_tokens - len(cropped))) or (
-                (max_atoms is not None) and ((total_atoms + new_atoms) > max_atoms)
+            new_tokens_data = token_data[list(new_indices_to_add)]
+            new_atoms_to_add = np.sum(new_tokens_data["atom_num"])
+
+            # DUAL RECOGNITION SAFEGUARD: Break if we exceed max_tokens OR max_atoms
+            if (len(new_indices_to_add) > (max_tokens - len(cropped_indices))) or (
+                (max_atoms is not None) and ((total_atoms + new_atoms_to_add) > max_atoms)
             ):
                 break
 
-            # Add new indices
-            cropped.update(new_indices)
-            total_atoms += new_atoms
+            # Add to crop safely
+            cropped_indices.update(new_indices_to_add)
+            total_atoms += new_atoms_to_add
 
-        # Get the cropped tokens sorted by index
-        token_data = token_data[sorted(cropped)]
+        # --- Step 4: Finalize the Cropped Data ---
+        if not cropped_indices:
+            msg = "Cropping resulted in zero tokens. This should not happen."
+            raise ValueError(msg)
+
+        # Get the cropped tokens sorted by original index to maintain order
+        final_token_indices = sorted(list(cropped_indices))
+        final_cropped_token_data = token_data[
+            np.isin(token_data["token_idx"], final_token_indices)
+        ]
+
+        sorter = np.argsort(final_cropped_token_data["token_idx"])
+        final_cropped_token_data = final_cropped_token_data[
+            sorter[
+                np.searchsorted(
+                    final_cropped_token_data["token_idx"][sorter], final_token_indices
+                )
+            ]
+        ]
 
         # Only keep bonds within the cropped tokens
-        indices = token_data["token_idx"]
-        token_bonds = token_bonds[np.isin(token_bonds["token_1"], indices)]
-        token_bonds = token_bonds[np.isin(token_bonds["token_2"], indices)]
+        token_bonds = data.bonds
+        indices_map = final_cropped_token_data["token_idx"]
+        token_bonds = token_bonds[np.isin(token_bonds["token_1"], indices_map)]
+        token_bonds = token_bonds[np.isin(token_bonds["token_2"], indices_map)]
 
-        # Return the cropped tokens
-        return replace(data, tokens=token_data, bonds=token_bonds)
+        # --- POST-CROP DIAGNOSTIC SUMMARY ---
+        final_protein_mask = final_cropped_token_data["mol_type"] == const.chain_type_ids["PROTEIN"]
+        final_glycan_mask = final_cropped_token_data["mol_type"] == const.chain_type_ids["NONPOLYMER"]
+        
+        num_prot_chains = len(np.unique(final_cropped_token_data[final_protein_mask]["asym_id"])) if np.any(final_protein_mask) else 0
+        num_glyc_chains = len(np.unique(final_cropped_token_data[final_glycan_mask]["asym_id"])) if np.any(final_glycan_mask) else 0
+        
+        num_sites = 0
+        if data.structure.glycosylation_sites is not None and np.any(final_protein_mask) and np.any(final_glycan_mask):
+            protein_tokens_in_crop = final_cropped_token_data[final_protein_mask]
+            final_protein_residues = set(zip(protein_tokens_in_crop["asym_id"], protein_tokens_in_crop["res_idx"]))
+            final_glycan_chain_ids = set(np.unique(final_cropped_token_data[final_glycan_mask]["asym_id"]))
+
+            num_sites = sum(1 for site in data.structure.glycosylation_sites 
+                            if (site["protein_chain_id"], site["protein_res_id"]) in final_protein_residues 
+                            and site["glycan_chain_id"] in final_glycan_chain_ids)
+
+        print(f"[{record_id}] Post-Crop Summary: {num_prot_chains} P, {num_glyc_chains} G, {num_sites} S.", flush=True)
+
+        return replace(data, tokens=final_cropped_token_data, bonds=token_bonds)
