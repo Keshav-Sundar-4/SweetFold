@@ -19,6 +19,9 @@ from boltz.model.modules.sugar_trunk import (
     stereo_discovery,
 )
 from boltz.model.modules.sugar_trunk import get_anomeric_pair_features
+from boltz.model.modules.sugar_trunk import compute_glycan_stereobias
+from boltz.model.modules.sugar_trunk import StereoProjector
+
 from boltz.model.modules.utils import LinearNoBias
 
 class ConfidenceModule(nn.Module):
@@ -42,7 +45,6 @@ class ConfidenceModule(nn.Module):
         full_embedder_args: dict = None,
         msa_args: dict = None,
         compile_pairformer=False,
-        stereo_proj: nn.Module = None,
     ):
         super().__init__()
         
@@ -73,16 +75,8 @@ class ConfidenceModule(nn.Module):
             self.s_to_z_prod_out = LinearNoBias(token_z, token_z)
             init.gating_init_(self.s_to_z_prod_out.weight)
 
-        # ROLE-AWARE STEREO EMBEDDING
-        if stereo_proj is not None:
-            self.stereo_proj = stereo_proj
-        else:
-            self.stereo_proj = nn.Sequential(
-                nn.Linear(931 + 64 + 64, 256, bias=True),
-                nn.GELU(),
-                nn.Linear(256, token_z, bias=False)
-            )
-            torch.nn.init.normal_(self.stereo_proj[2].weight, mean=0.0, std=0.02)
+        # ROLE-AWARE STEREO EMBEDDING (COMPLETELY DECOUPLED FROM TRUNK)
+        self.stereo_proj = StereoProjector(token_z)
 
         self.imitate_trunk = imitate_trunk
         if self.imitate_trunk:
@@ -104,7 +98,6 @@ class ConfidenceModule(nn.Module):
 
             self.msa_module = MSAModule(token_z=token_z, s_input_dim=s_input_dim, **msa_args)
             
-            # Omit **pairformer_args to use the defaults!
             self.sugar_pairformer_module = SugarPairformer(
                 token_s=token_s, 
                 token_z=token_z,
@@ -138,7 +131,6 @@ class ConfidenceModule(nn.Module):
                 self.rel_pos = RelativePositionEncoder(token_z)
                 self.token_bonds = nn.Linear(1, token_z, bias=False)
 
-            # Omit **pairformer_args to use the defaults!
             self.sugar_pairformer_stack = SugarPairformer(
                 token_s=token_s, 
                 token_z=token_z,
@@ -165,7 +157,6 @@ class ConfidenceModule(nn.Module):
     ):
         # --- DDP-PROOFING: Always touch stereo_proj parameters ---
         stereo_dummy = sum(p.sum() for p in self.stereo_proj.parameters())
-        # Note: s and z are updated later in the logic, so we inject the touch into the base s/z
         s = s + (0.0 * stereo_dummy)
         z = z + (0.0 * stereo_dummy)
 
@@ -181,7 +172,6 @@ class ConfidenceModule(nn.Module):
                         run_sequentially=False,
                     )
                 )
-            # ... (rest of sequential logic)
             out_dict = {}
             for key in out_dicts[0]:
                 if key != "pair_chains_iptm":
@@ -205,43 +195,13 @@ class ConfidenceModule(nn.Module):
             z_init = z_init + self.rel_pos(feats)
             z_init = z_init + self.token_bonds(feats["token_bonds"].float())
             
-            # Singular Stereo Bias Injection
-            if "mono_type" in feats and "token_to_mono_idx" in feats:
-                adj = feats["token_bonds"].squeeze(-1)
-                m_types = feats["mono_type"].argmax(dim=-1)
-                t_idx = feats["token_to_mono_idx"]
-                
-                rep_atom_idx = feats["token_to_rep_atom"].argmax(dim=-1) 
-                atom_name_ints = feats["ref_atom_name_chars"].argmax(dim=-1)[:, :, 0] 
-                token_names = torch.gather(atom_name_ints, 1, rep_atom_idx) 
-
-                for b in range(B):
-                    valid = t_idx[b] != -1
-                    if not valid.any(): continue
-                    for m_val in torch.unique(t_idx[b][valid]):
-                        indices = torch.where(t_idx[b] == m_val)[0]
-                        res = stereo_discovery(indices, adj[b])
-                        for e in res:
-                            si, ai = indices[e['sub_idx']], indices[e['anchor_indices'][0]]
-                            m_type = m_types[b, si]
-                            sub_n = token_names[b, si]
-                            anc_n = token_names[b, ai]
-
-                            m_oh = torch.nn.functional.one_hot(m_type, num_classes=931).float()
-                            anc_oh = torch.nn.functional.one_hot(anc_n, num_classes=64).float()
-                            sub_oh = torch.nn.functional.one_hot(sub_n, num_classes=64).float()
-                            
-                            cat_feats = torch.cat([m_oh, anc_oh, sub_oh], dim=-1)
-                            bias = self.stereo_proj(cat_feats)
-                            
-                            z_init[b, si, ai] += bias
-                            z_init[b, ai, si] += bias
+            # ALL-TO-ALL STEREOBIAS (Using Confidence Module's Own Weights)
+            z_init = z_init + compute_glycan_stereobias(z_init, feats, self.stereo_proj)
 
             s = s_init + self.s_recycle(self.s_norm(s))
             z = z_init + self.z_recycle(self.z_norm(z))
 
         else:
-            # Standard Confidence Branch Logic
             s_inputs = self.s_inputs_norm(s_inputs).repeat_interleave(multiplicity, 0)
             if not self.no_update_s: s = self.s_norm(s)
             if self.add_s_input_to_s: s = s + self.s_input_to_s(s_inputs)
@@ -251,32 +211,9 @@ class ConfidenceModule(nn.Module):
                 z = z + self.rel_pos(feats)
                 z = z + self.token_bonds(feats["token_bonds"].float())
                 
-                if "mono_type" in feats and "token_to_mono_idx" in feats:
-                    adj = feats["token_bonds"].squeeze(-1).repeat_interleave(multiplicity, 0)
-                    m_types = feats["mono_type"].argmax(dim=-1).repeat_interleave(multiplicity, 0)
-                    t_idx = feats["token_to_mono_idx"].repeat_interleave(multiplicity, 0)
-                    
-                    rep_atom_idx = feats["token_to_rep_atom"].argmax(dim=-1).repeat_interleave(multiplicity, 0)
-                    atom_name_ints = feats["ref_atom_name_chars"].argmax(dim=-1)[:, :, 0].repeat_interleave(multiplicity, 0)
-                    token_names = torch.gather(atom_name_ints, 1, rep_atom_idx)
+                # ALL-TO-ALL STEREOBIAS (Using Confidence Module's Own Weights)
+                z = z + compute_glycan_stereobias(z, feats, self.stereo_proj)
 
-                    for b in range(z.shape[0]):
-                        valid = t_idx[b] != -1
-                        if not valid.any(): continue
-                        for m_val in torch.unique(t_idx[b][valid]):
-                            indices = torch.where(t_idx[b] == m_val)[0]
-                            res = stereo_discovery(indices, adj[b])
-                            for e in res:
-                                si, ai = indices[e['sub_idx']], indices[e['anchor_indices'][0]]
-                                m_oh = torch.nn.functional.one_hot(m_types[b, si], num_classes=931).float()
-                                anc_oh = torch.nn.functional.one_hot(token_names[b, ai], num_classes=64).float()
-                                sub_oh = torch.nn.functional.one_hot(token_names[b, si], num_classes=64).float()
-                                cat_feats = torch.cat([m_oh, anc_oh, sub_oh], dim=-1)
-                                bias = self.stereo_proj(cat_feats)
-                                z[b, si, ai] += bias
-                                z[b, ai, si] += bias
-
-        # (Rest of confidence forward remains same...)
         s = s.repeat_interleave(multiplicity, 0)
         if self.use_s_diffusion:
             s = s + self.s_diffusion_to_s(self.s_diffusion_norm(s_diffusion))
@@ -318,7 +255,7 @@ class ConfidenceModule(nn.Module):
             multiplicity=multiplicity, pred_distogram_logits=pred_distogram_logits,
         ))
         return out_dict
-            
+
 class ConfidenceHeads(nn.Module):
     """Confidence heads."""
 
