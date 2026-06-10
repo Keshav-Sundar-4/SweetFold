@@ -42,142 +42,288 @@ NUM_AMINO_ACIDS = 22
 #############################################################################################################
 #############################################################################################################
 
+class StereoProjector(nn.Module):
+    """
+    Embedding-based MLP for all-to-all stereobias.
+
+    Uses:
+      - monosaccharide type
+      - full 4-character atom name for atom i
+      - full 4-character atom name for atom j
+
+    This preserves names like C10, N2A, C1A, etc., instead of collapsing
+    them to only the first two characters.
+    """
+
+    def __init__(
+        self,
+        token_z: int,
+        num_mono_types: int = 931,
+        char_vocab_size: int = 64,
+        mono_emb_dim: int = 128,
+        char_emb_dim: int = 32,
+        atom_name_len: int = 4,
+    ):
+        super().__init__()
+
+        self.atom_name_len = atom_name_len
+        self.char_vocab_size = char_vocab_size
+
+        self.mono_embed = nn.Embedding(num_mono_types, mono_emb_dim)
+        self.char_embed = nn.Embedding(char_vocab_size, char_emb_dim)
+
+        atom_emb_dim = atom_name_len * char_emb_dim
+
+        # mono + atom_i_name + atom_j_name
+        input_dim = mono_emb_dim + atom_emb_dim + atom_emb_dim
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 1024, bias=True),
+            nn.GELU(),
+            nn.Linear(1024, 512, bias=True),
+            nn.GELU(),
+            nn.Linear(512, token_z, bias=False),
+        )
+
+        # Gentle initialization for dense bias injection.
+        nn.init.normal_(self.mlp[4].weight, mean=0.0, std=0.02)
+
+    def forward(
+        self,
+        mono_type_idx: torch.Tensor,
+        atom_i_name_chars: torch.Tensor,
+        atom_j_name_chars: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            mono_type_idx:
+                Long tensor of shape [...], containing mono type ids.
+
+            atom_i_name_chars:
+                Long tensor of shape [..., 4], containing encoded atom-name chars.
+
+            atom_j_name_chars:
+                Long tensor of shape [..., 4], containing encoded atom-name chars.
+
+        Returns:
+            Tensor of shape [..., token_z].
+        """
+
+        mono_type_idx = mono_type_idx.long().clamp(
+            min=0,
+            max=self.mono_embed.num_embeddings - 1,
+        )
+
+        atom_i_name_chars = atom_i_name_chars.long().clamp(
+            min=0,
+            max=self.char_vocab_size - 1,
+        )
+        atom_j_name_chars = atom_j_name_chars.long().clamp(
+            min=0,
+            max=self.char_vocab_size - 1,
+        )
+
+        m_emb = self.mono_embed(mono_type_idx)
+
+        i_emb = self.char_embed(atom_i_name_chars)
+        j_emb = self.char_embed(atom_j_name_chars)
+
+        # [..., 4, char_emb_dim] -> [..., 4 * char_emb_dim]
+        i_emb = i_emb.flatten(start_dim=-2)
+        j_emb = j_emb.flatten(start_dim=-2)
+
+        x = torch.cat([m_emb, i_emb, j_emb], dim=-1)
+        return self.mlp(x)
+
 def compute_glycan_stereobias(
     z: torch.Tensor,
     feats: Dict[str, Any],
-    stereo_proj: nn.Module
+    stereo_proj: nn.Module,
 ) -> torch.Tensor:
     """
-    Computes and applies stereochemical bias to the Z-track.
-    Includes advanced glycosidic linkage aliasing and strict heteroatom ring discovery.
+    Computes a dense, all-to-all stereo prior for each monosaccharide.
+
+    Direct stereobias relationships are generated among atoms belonging to the
+    same monosaccharide residue, with one exception: a bonded external glycosidic
+    non-carbon atom from the same glycan chain may be included as a hinge atom
+    for the residue it is not part of.
+
+    This version preserves the full 4-character atom name, so atoms like C10,
+    N2A, C1A, etc. remain distinguishable.
     """
+
     if "mono_type" not in feats or "token_to_mono_idx" not in feats:
         return torch.zeros_like(z)
 
     B, N = feats["token_pad_mask"].shape
-    token_mono_idx = feats["token_to_mono_idx"]
-    mono_types = feats["mono_type"].argmax(dim=-1)
-    adj_matrix = feats["token_bonds"].squeeze(-1)
-    
-    rep_atom_idx = feats["token_to_rep_atom"].argmax(dim=-1)
-    ref_atom_name_chars = feats["ref_atom_name_chars"] 
-    
-    atom_name_first_char_ints = ref_atom_name_chars.argmax(dim=-1)[:, :, 0]
-    token_first_chars = torch.gather(atom_name_first_char_ints, 1, rep_atom_idx)
+    device = z.device
 
-    def decode_name(b_idx, t_idx):
-        a_idx = rep_atom_idx[b_idx, t_idx]
-        ints = ref_atom_name_chars[b_idx, a_idx].argmax(dim=-1)
-        return "".join([chr(c.item() + 32) for c in ints if c.item() > 0]).strip()
+    token_mono_idx = feats["token_to_mono_idx"]              # [B, N]
+    mono_types = feats["mono_type"].argmax(dim=-1)           # [B, N]
+    adj_matrix = feats["token_bonds"].squeeze(-1).bool()     # [B, N, N]
+    asym_id = feats["asym_id"]                               # [B, N]
 
-    reverse_mono_map = {v: k for k, v in MONO_TYPE_MAP.items()}
+    rep_atom_idx = feats["token_to_rep_atom"].argmax(dim=-1) # [B, N]
+    ref_atom_name_chars = feats["ref_atom_name_chars"]       # [B, A, 4, 64]
+    ref_elements = feats["ref_element"].argmax(dim=-1)       # [B, A]
 
     z_bias = torch.zeros_like(z)
 
+    def get_token_name_chars(b_idx: int, t_idx: int) -> torch.Tensor:
+        """
+        Returns encoded 4-character atom name for token t_idx in batch b_idx.
+        Shape: [4]
+        """
+        a_idx = rep_atom_idx[b_idx, t_idx]
+        return ref_atom_name_chars[b_idx, a_idx].argmax(dim=-1).long()
+
+    def decode_chars(chars: torch.Tensor) -> str:
+        """
+        Decodes encoded atom-name chars back to string.
+        Encoding is ord(c) - 32, with 0 treated as blank/pad.
+        """
+        out = []
+        for c in chars:
+            v = int(c.item())
+            if v > 0:
+                out.append(chr(v + 32))
+        return "".join(out).strip()
+
+    def encode_name_4(name: str) -> torch.Tensor:
+        """
+        Encodes an atom name into 4 chars using the same ord(c) - 32 convention.
+        Pads/truncates to 4 characters.
+        """
+        name = str(name).strip()
+        name = name[:4].ljust(4)
+
+        vals = []
+        for c in name:
+            encoded = ord(c) - 32
+            encoded = max(0, min(63, encoded))
+            vals.append(encoded)
+
+        return torch.tensor(vals, dtype=torch.long, device=device)
+
     for b in range(B):
-        valid_mask = (token_mono_idx[b] != -1)
+        valid_mask = token_mono_idx[b] != -1
         if not valid_mask.any():
             continue
-            
+
         unique_monos = torch.unique(token_mono_idx[b][valid_mask])
-        
+
         for m_val in unique_monos:
             m_indices = torch.where(token_mono_idx[b] == m_val)[0]
-            m_type_int = mono_types[b, m_indices[0]].item()
-            m_type_str = reverse_mono_map.get(m_type_int, "UNK")
-            
-            # 1. Local Ring Discovery
-            local_bonds = adj_matrix[b][m_indices][:, m_indices]
-            adj_list = [torch.where(local_bonds[i])[0].tolist() for i in range(len(m_indices))]
-            
-            def find_cycles(nodes, adj):
-                cycles = []
-                for start_node in range(len(nodes)):
-                    stack = [(start_node, [start_node])]
-                    while stack:
-                        node, path = stack.pop()
-                        for neighbor in adj[node]:
-                            if neighbor == start_node and len(path) in [5, 6]:
-                                sorted_path = sorted(path)
-                                if sorted_path not in cycles:
-                                    cycles.append(sorted_path)
-                            elif neighbor not in path and len(path) < 6:
-                                stack.append((neighbor, path + [neighbor]))
-                return cycles
-            
-            all_cycles = find_cycles(range(len(m_indices)), adj_list)
-            if not all_cycles:
+            if m_indices.numel() == 0:
                 continue
 
-            # Strict Heteroatom Ring Filtering
-            valid_rings = []
-            for cycle in all_cycles:
-                global_cycle = [m_indices[i].item() for i in cycle]
-                non_carbon_count = 0
-                for a_idx in global_cycle:
-                    name = decode_name(b, a_idx)
-                    if name and name[0] != 'C':
-                        non_carbon_count += 1
-                
-                if non_carbon_count == 1:
-                    valid_rings.append(global_cycle)
+            m_type_int = int(mono_types[b, m_indices[0]].item())
+            m_chain_id = asym_id[b, m_indices[0]]
 
-            if len(valid_rings) == 0:
+            # Maps global token idx -> encoded 4-char atom name tensor [4].
+            grid_nodes: Dict[int, torch.Tensor] = {}
+
+            # 1. Add all atoms in the current monosaccharide residue.
+            for i in m_indices:
+                idx = int(i.item())
+                grid_nodes[idx] = get_token_name_chars(b, idx)
+
+            # 2. Add the glycosidic hinge atom from a neighboring residue.
+            # This is the only allowed cross-residue inclusion.
+            for i in m_indices:
+                idx = int(i.item())
+
+                internal_name_chars = get_token_name_chars(b, idx)
+                internal_name = decode_chars(internal_name_chars)
+
+                neighbors = torch.where(adj_matrix[b, idx])[0]
+
+                for n in neighbors:
+                    n_idx = int(n.item())
+
+                    # Must be a glycan atom.
+                    if token_mono_idx[b, n_idx] == -1:
+                        continue
+
+                    # Must be external to this monosaccharide residue.
+                    if token_mono_idx[b, n_idx] == m_val:
+                        continue
+
+                    # Must be in the same glycan chain.
+                    if asym_id[b, n_idx] != m_chain_id:
+                        continue
+
+                    # External glycosidic hinge should be non-carbon.
+                    n_atom_idx = rep_atom_idx[b, n_idx]
+                    n_elem = int(ref_elements[b, n_atom_idx].item())
+
+                    if n_elem == 6:
+                        continue
+
+                    if n_idx in grid_nodes:
+                        continue
+
+                    external_name_chars = get_token_name_chars(b, n_idx)
+                    external_name = decode_chars(external_name_chars)
+
+                    # Alias based on the current residue atom it is bonded to.
+                    # Example:
+                    #   internal C1 bonded to external O4 -> external hinge alias O1
+                    #   internal C10 bonded to external O? -> alias O10
+                    #
+                    # This preserves multi-character positions up to 4 chars total.
+                    c_num = "".join(ch for ch in internal_name if ch.isdigit())
+                    if not c_num:
+                        c_num = "1"
+
+                    if external_name:
+                        alias_name = f"{external_name[0]}{c_num}"
+                    else:
+                        alias_name = f"X{c_num}"
+
+                    grid_nodes[n_idx] = encode_name_4(alias_name)
+
+            # 3. Build the local dense pairwise patch and project it.
+            nodes = list(grid_nodes.keys())
+            K = len(nodes)
+
+            if K <= 1:
                 continue
-            elif len(valid_rings) > 1:
-                continue
-            
-            main_ring_global = valid_rings[0]
-            ring_set = set(main_ring_global)
-            
-            # 2. Iterate Ring Atoms to find ALL substituents
-            for ring_pos, r_idx in enumerate(main_ring_global):
-                neighbors = torch.where(adj_matrix[b, r_idx])[0].tolist()
-                
-                for n_idx in neighbors:
-                    if n_idx in ring_set:
-                        continue 
-                        
-                    opp_pos = (ring_pos + len(main_ring_global) // 2) % len(main_ring_global)
-                    anchor_idx = main_ring_global[opp_pos]
-                    
-                    r_name = decode_name(b, r_idx)
-                    n_name = decode_name(b, n_idx)
-                    anc_name = decode_name(b, anchor_idx)
-                    
-                    is_inter = token_mono_idx[b, n_idx] != m_val
-                    is_glycan_neighbor = token_mono_idx[b, n_idx] != -1
-                    alias_first_char_int = token_first_chars[b, n_idx].item()
 
-                    if is_inter:
-                        if is_glycan_neighbor:
-                            n_char = n_name[0] if len(n_name) > 0 else ""
-                            if n_char in ['O', 'N', 'S']:
-                                c_num = "".join(filter(str.isdigit, r_name))
-                                if not c_num:
-                                    c_num = "1" 
-                                
-                                alias_name = f"O{c_num}"
-                                alias_first_char_int = ord('O') - 32 
+            name_chars = torch.stack(
+                [grid_nodes[n] for n in nodes],
+                dim=0,
+            ).long()  # [K, 4]
 
-                    # 3. Compute and Apply Bias to Z-Track
-                    m_oh = torch.nn.functional.one_hot(
-                        torch.tensor(m_type_int, device=z.device), num_classes=931
-                    ).float()
-                    anc_char_int = token_first_chars[b, anchor_idx].item()
-                    anc_oh = torch.nn.functional.one_hot(
-                        torch.tensor(anc_char_int, device=z.device), num_classes=64
-                    ).float()
-                    sub_oh = torch.nn.functional.one_hot(
-                        torch.tensor(alias_first_char_int, device=z.device), num_classes=64
-                    ).float()
-                    
-                    cat_feats = torch.cat([m_oh, anc_oh, sub_oh], dim=-1)
-                    bias = stereo_proj(cat_feats)
-                    
-                    z_bias[b, n_idx, anchor_idx] += bias
-                    z_bias[b, anchor_idx, n_idx] += bias
-                    
+            row_name_chars = name_chars[:, None, :].expand(K, K, 4)
+            col_name_chars = name_chars[None, :, :].expand(K, K, 4)
+
+            m_type_grid = torch.full(
+                (K, K),
+                m_type_int,
+                dtype=torch.long,
+                device=device,
+            )
+
+            bias_patch = stereo_proj(
+                m_type_grid,
+                row_name_chars,
+                col_name_chars,
+            )  # [K, K, token_z]
+
+            # Do not bias self-pairs.
+            eye_mask = torch.eye(K, device=device, dtype=torch.bool)
+            bias_patch = bias_patch.masked_fill(eye_mask.unsqueeze(-1), 0.0)
+
+            node_tensor = torch.tensor(nodes, device=device, dtype=torch.long)
+            row_nodes, col_nodes = torch.meshgrid(
+                node_tensor,
+                node_tensor,
+                indexing="ij",
+            )
+
+            z_bias[b, row_nodes, col_nodes] += bias_patch
+
     return z_bias
             
 def get_anomeric_pair_features(feats: Dict[str, Tensor]) -> Tensor:
