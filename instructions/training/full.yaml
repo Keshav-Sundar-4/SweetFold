@@ -196,4 +196,4 @@ model:
   diffusion_loss_args:
     add_smooth_lddt_loss: true
     nucleotide_loss_weight: 5.0
-    ligand_loss_weight: 10.0
+    ligand_loss_weight: 10.0 
