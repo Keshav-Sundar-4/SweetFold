@@ -24,7 +24,8 @@ from boltz.model.modules.sugar_trunk import (
     SugarPairformer, 
     stereo_discovery,
 )
-from boltz.model.modules.sugar_trunk import get_anomeric_pair_features
+from boltz.model.modules.sugar_trunk import compute_glycan_stereobias
+from boltz.model.modules.sugar_trunk import StereoProjector
 from boltz.model.loss.confidence import confidence_loss
 from boltz.model.loss.distogram import distogram_loss
 from boltz.model.loss.validation import (
@@ -180,16 +181,8 @@ class Boltz1(LightningModule):
         self.rel_pos = RelativePositionEncoder(token_z)
         self.token_bonds = nn.Linear(1, token_z, bias=False)
         
-        # --- THE GOLDILOCKS FIX: Non-Linear MLP ---
-        # Allows the network to learn interactions (e.g., Galactose AND C4)
-        self.stereo_proj = nn.Sequential(
-            nn.Linear(931 + 64 + 64, 256, bias=True),
-            nn.GELU(),
-            nn.Linear(256, token_z, bias=False)
-        )
-        
-        # Initialize the last layer to near-zero so it starts as a gentle bias
-        torch.nn.init.normal_(self.stereo_proj[2].weight, mean=0.0, std=0.02)
+        # --- THE EMBEDDING MLP UPGRADE ---
+        self.stereo_proj = StereoProjector(token_z)
 
         self.s_norm = nn.LayerNorm(token_s)
         self.z_norm = nn.LayerNorm(token_z)
@@ -207,7 +200,6 @@ class Boltz1(LightningModule):
                 **msa_args,
             )
             
-        # Omit **pairformer_args so it relies on the internal small defaults!
         self.sugar_pairformer_module = SugarPairformer(
             token_s=token_s, 
             token_z=token_z,
@@ -270,7 +262,6 @@ class Boltz1(LightningModule):
                     full_embedder_args=confidence_full_embedder_args,
                     msa_args=msa_args,
                     glycan_bias_args=glycan_bias_args,
-                    stereo_proj=self.stereo_proj,
                     **confidence_model_args,
                 )
             else:
@@ -280,7 +271,6 @@ class Boltz1(LightningModule):
                     pairformer_args=pairformer_args,
                     glycan_bias_args=glycan_bias_args,
                     compute_pae=alpha_pae > 0,
-                    stereo_proj=self.stereo_proj,
                     **confidence_model_args,
                 )
             if compile_confidence:
@@ -289,24 +279,20 @@ class Boltz1(LightningModule):
                 )
 
         self._configure_parameter_grads()
-
-    def _configure_parameter_grads(self) -> None:
-        print("[Model Grad Config] MODE: Full Fine-Tuning (NO FROZEN PARAMETERS).")
-
-        # 1. Enable gradients for ALL parameters
-        for param in self.parameters():
-            param.requires_grad = True
-
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.parameters())
         
-        print("-" * 50)
+    def _configure_parameter_grads(self) -> None:
+        print("[Model Grad Config] MODE: No parameter grad changes.")
+
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print("-" * 72)
         print(f"[Model Grad Config] Total parameters:     {total_params:,}")
         print(f"[Model Grad Config] Trainable parameters: {trainable_params:,}")
-        print("-" * 50)
+        print("-" * 72)
 
         if self.training and trainable_params == 0:
-            print("CRITICAL WARNING: No trainable parameters were found for the current training configuration.")
+            print("CRITICAL WARNING: No trainable parameters were found.")
 
     def forward(
         self,
