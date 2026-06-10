@@ -332,12 +332,12 @@ class ClusterSampler(Sampler):
 
             while True:
                 chunk = []
-                chunk.extend(sample_group(ser_items, ser_weights, 500))
-                chunk.extend(sample_group(thr_items, thr_weights, 500))
+                chunk.extend(sample_group(ser_items, ser_weights, 750))
+                chunk.extend(sample_group(thr_items, thr_weights, 750))
                 chunk.extend(sample_group(other_glyco_items, other_glyco_weights, 750))
-                chunk.extend(sample_group(lectin_items, lectin_weights, 500))
-                chunk.extend(sample_group(eq_free_glycan_items, eq_free_glycan_weights, 1000))
-                chunk.extend(sample_group(eq_monosaccharide_items, eq_monosaccharide_weights, 500))
+                chunk.extend(sample_group(lectin_items, lectin_weights, 1000))
+                chunk.extend(sample_group(eq_free_glycan_items, eq_free_glycan_weights, 250))
+                chunk.extend(sample_group(eq_monosaccharide_items, eq_monosaccharide_weights, 1000))
                 if not chunk: return
                 random.shuffle(chunk)
                 for rec, kind, idx in chunk:
