@@ -2,836 +2,551 @@
 
 This guide explains how to set up SweetFold for inference and training.
 
-SweetFold is built by installing Boltz v1.0.0 first, then replacing the installed Boltz source-code folder with the SweetFold-modified Boltz folder from the SweetFold GitHub repository.
+SweetFold uses Boltz v1.0.0 as the base package. After installing Boltz, you replace the installed Boltz source-code folder with the SweetFold-modified `boltz` folder from GitHub.
 
-The SweetFold-modified Boltz source code is located here:
+SweetFold `boltz` folder:
 
 https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+
+Download that folder. The downloaded folder should be named:
+
+    boltz
 
 ---
 
 # Part 1: SweetFold Inference Setup Instructions
 
-These instructions explain how to set up SweetFold for inference using the epoch 23 SweetFold checkpoint.
+Inference is simple. You need to:
 
-Inference is simpler than training. You only need:
-
-1. A working SweetFold/Boltz environment.
-2. Boltz v1.0.0 installed.
-3. The SweetFold-modified `boltz` source-code folder.
-4. The SweetFold epoch 23 checkpoint.
-5. An example inference shell script or your own command.
-
----
-
-## 1. Important Inference Paths
-
-Replace every `/path/to/...` placeholder with the correct absolute path on your system.
-
-### SweetFold environment
-
-```text
-/path/to/sweetfold_env
-```
-
-This is the Python or Conda environment where Boltz/SweetFold is installed.
-
-### SweetFold weights directory
-
-```text
-/path/to/sweetfold_env/weights
-```
-
-This is where you should place the SweetFold inference checkpoint.
-
-You may need to create this folder yourself.
-
-### Installed Boltz source-code directory
-
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-This is the installed Boltz package folder inside the Python environment. This folder must be replaced with the SweetFold-modified `boltz` folder from:
-
-```text
-SweetFold/src/boltz
-```
-
-### SweetFold GitHub repository
-
-```text
-https://github.com/Keshav-Sundar-4/SweetFold
-```
-
-The SweetFold-modified Boltz folder is specifically located at:
-
-```text
-https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-```
-
-### SweetFold checkpoint page
-
-```text
-https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
-```
-
-This Hugging Face repository contains the SweetFold checkpoint files.
+1. Create a Python environment.
+2. Install Boltz v1.0.0.
+3. Download the SweetFold `boltz` folder.
+4. Replace the installed Boltz folder with the SweetFold folder.
+5. Create a weights folder.
+6. Download the SweetFold epoch 23 checkpoint.
+7. Run inference using your shell script or command.
 
 ---
 
-## 2. Create the SweetFold Environment
+## 1. Create a SweetFold Environment
 
-Create and activate a Python environment.
+Create a fresh Conda environment:
 
-Example using Conda:
+    conda create -n sweetfold_env python=3.10 -y
+    conda activate sweetfold_env
+    python -m pip install --upgrade pip
 
-```bash
-conda create -n sweetfold_env python=3.10 -y
-conda activate sweetfold_env
-python -m pip install --upgrade pip
-```
+Install Boltz v1.0.0 with CUDA support:
 
-Install Boltz v1.0.0 specifically with CUDA support:
+    pip install "boltz[cuda]==1.0.0"
 
-```bash
-pip install "boltz[cuda]==1.0.0"
-```
+Use this exact version.
 
-Do not install a different Boltz version unless you know exactly what you are doing. SweetFold expects the Boltz v1.0.0 codebase as the base package.
+You can find the full path to your active environment by running:
 
----
+    echo $CONDA_PREFIX
 
-## 3. Create the Weights Folder
+In the rest of these instructions, that environment path is written as:
 
-Create a weights folder inside the SweetFold environment.
+    /path/to/sweetfold_env
 
-```bash
-mkdir -p /path/to/sweetfold_env/weights
-```
-
-This folder will store the SweetFold checkpoint used for inference.
+Replace `/path/to/sweetfold_env` with the path printed by `echo $CONDA_PREFIX`.
 
 ---
 
-## 4. Download the SweetFold Epoch 23 Checkpoint
+## 2. Download the SweetFold `boltz` Folder
 
-Open the SweetFold Hugging Face repository in your browser:
+Go to the SweetFold `boltz` folder on GitHub:
 
-```text
-https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
-```
+    https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
 
-Download the epoch 23 SweetFold checkpoint from that page.
+Download that folder.
 
-After downloading it, move the checkpoint into:
+After downloading, place the downloaded `boltz` folder somewhere convenient, for example:
 
-```text
-/path/to/sweetfold_env/weights
-```
+    /path/to/project/boltz
 
-For example, your weights folder may look like:
+The folder should be named:
 
-```text
-/path/to/sweetfold_env/weights/
-└── boltz1_glycan_epoch_23.ckpt
-```
+    boltz
 
-The exact filename should match the checkpoint you downloaded. Do not rename it unless your inference script expects a specific filename.
+You will use this downloaded `boltz` folder to replace the original Boltz folder that was installed by:
+
+    pip install "boltz[cuda]==1.0.0"
 
 ---
 
-## 5. Download the SweetFold-Modified `boltz` Folder
-
-The SweetFold-modified Boltz source code lives inside the SweetFold GitHub repository at:
-
-```text
-https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-```
-
-The folder path inside GitHub is:
-
-```text
-src/boltz
-```
-
-However, the folder you copy into your environment must be named:
-
-```text
-boltz
-```
-
-It must not be named:
-
-```text
-src/boltz
-```
-
-The final installed package path must look like:
-
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-not:
-
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/src/boltz
-```
-
-### Recommended method: clone the full SweetFold repository
-
-```bash
-cd /path/to/project
-git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
-```
-
-After cloning, the SweetFold-modified Boltz folder will be located at:
-
-```text
-/path/to/project/sweetfold_repo/src/boltz
-```
-
-This is the folder you will use to replace the installed Boltz package.
-
----
-
-## 6. Replace the Installed Boltz Folder
+## 3. Replace the Installed Boltz Folder
 
 Activate the SweetFold environment:
 
-```bash
-conda activate sweetfold_env
-```
+    conda activate sweetfold_env
 
-Find the installed Boltz source-code folder:
+Find the installed Boltz folder:
 
-```bash
-python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-```
+    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
 
-This should print something like:
+This will print something like:
 
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
+    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-Back up the original Boltz folder:
+Back up the original installed Boltz folder:
 
-```bash
-mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-```
+    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
 
-Copy the SweetFold-modified Boltz folder into the environment:
+Copy the downloaded SweetFold `boltz` folder into the environment:
 
-```bash
-cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
+    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-Verify that the copied folder is named correctly:
+Verify that Python can import the replaced package:
 
-```bash
-ls /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-You should see the contents of the Boltz source-code package directly inside that folder.
-
-Verify that Python can import the SweetFold-modified Boltz package:
-
-```bash
-python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
-```
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
 
 ---
 
-## 7. Run SweetFold Inference
+## 4. Create the Weights Folder
 
-After the environment is installed, the SweetFold-modified `boltz` folder has been copied into place, and the epoch 23 checkpoint has been placed in the weights folder, you can run SweetFold inference.
+Create a weights folder inside the SweetFold environment:
 
-An example HPC shell script may be provided in the same folder as the inference files. Before running it, update the paths inside the script so they point to:
+    mkdir -p /path/to/sweetfold_env/weights
 
-```text
-/path/to/sweetfold_env
-/path/to/sweetfold_env/weights/boltz1_glycan_epoch_23.ckpt
-/path/to/your/input.yaml
-/path/to/your/output_directory
-```
-
-A typical inference command will need to point to:
-
-1. The SweetFold input YAML file.
-2. The SweetFold checkpoint.
-3. The desired output directory.
-4. Any inference-specific flags required by the provided script.
-
-If using an HPC shell script, run something like:
-
-```bash
-sbatch run_inference.sh
-```
-
-If running locally or interactively, activate the environment first:
-
-```bash
-conda activate sweetfold_env
-```
-
-Then run the inference command provided by your shell script or notebook.
+This folder will store the checkpoint used for inference.
 
 ---
 
-## 8. Inference Setup Summary
+## 5. Download the SweetFold Epoch 23 Checkpoint
 
-The overall inference setup flow is:
+Open the SweetFold Hugging Face repository:
 
-```bash
-# Create and activate environment
-conda create -n sweetfold_env python=3.10 -y
-conda activate sweetfold_env
-python -m pip install --upgrade pip
+    https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
 
-# Install Boltz v1.0.0 specifically
-pip install "boltz[cuda]==1.0.0"
+Download the SweetFold epoch 23 checkpoint.
 
-# Create weights folder
-mkdir -p /path/to/sweetfold_env/weights
+Place the checkpoint inside:
 
-# Manually download the epoch 23 checkpoint from:
-# https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
-# Then move it into:
-# /path/to/sweetfold_env/weights/
+    /path/to/sweetfold_env/weights
 
-# Clone SweetFold repository
-cd /path/to/project
-git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
+For example, the final checkpoint path may look like:
 
-# Replace installed Boltz source code with SweetFold-modified Boltz
-python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+    /path/to/sweetfold_env/weights/boltz1_glycan_epoch_23.ckpt
 
-# Verify import
-python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
+Use the exact checkpoint filename expected by your inference script. If your script points to a different checkpoint filename, either update the script or rename the checkpoint consistently.
 
-# Run inference using the provided shell script or command
-sbatch run_inference.sh
-```
+---
+
+## 6. Run SweetFold Inference
+
+Before running inference, update your shell script or inference command so it points to:
+
+    /path/to/sweetfold_env
+    /path/to/sweetfold_env/weights/boltz1_glycan_epoch_23.ckpt
+    /path/to/your/input.yaml
+    /path/to/your/output_directory
+
+If using an HPC shell script, submit it with:
+
+    sbatch run_inference.sh
+
+If running interactively, activate the environment first:
+
+    conda activate sweetfold_env
+
+Then run the inference command used by your script.
+
+---
+
+## 7. Inference Setup Summary
+
+The inference setup flow is:
+
+    conda create -n sweetfold_env python=3.10 -y
+    conda activate sweetfold_env
+    python -m pip install --upgrade pip
+    pip install "boltz[cuda]==1.0.0"
+
+    echo $CONDA_PREFIX
+
+    # Download the SweetFold boltz folder from:
+    # https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+    # Put it somewhere like:
+    # /path/to/project/boltz
+
+    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
+
+    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
+    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
+
+    mkdir -p /path/to/sweetfold_env/weights
+
+    # Download the epoch 23 checkpoint from:
+    # https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
+    # Place it inside:
+    # /path/to/sweetfold_env/weights
+
+    sbatch run_inference.sh
 
 ---
 
 # Part 2: SweetFold Training Setup Instructions
 
-This guide explains how to set up and run SweetFold training using four files:
+Training uses four files:
 
-```text
-full.yaml
-train.py
-train.sh
-update_checkpoint.py
-```
+    full.yaml
+    train.py
+    train.sh
+    update_checkpoint.py
 
-All file paths below are written as general placeholders. Before running training, replace every `/path/to/...` path with the correct absolute path on your system.
+Training requires:
 
----
-
-## 1. Expected File Layout
-
-Place the following four files in the same working directory:
-
-```text
-/path/to/sweetfold_training/
-├── full.yaml
-├── train.py
-├── train.sh
-└── update_checkpoint.py
-```
-
-For example, if your working directory is:
-
-```text
-/path/to/sweetfold_training/
-```
-
-then all commands should be run from inside that folder unless otherwise specified.
+1. A SweetFold environment.
+2. Boltz v1.0.0.
+3. The SweetFold `boltz` folder.
+4. A weights folder.
+5. `boltz1_conf_converted.ckpt`.
+6. `symmetry.pkl`.
+7. `ccd.pkl`.
+8. A processed glycan training dataset.
 
 ---
 
-## 2. Important Training Paths
+## 1. Create the Training Folder
 
-The instructions use the following general paths.
+Create a folder for the training files:
 
-### SweetFold environment
+    mkdir -p /path/to/sweetfold_training
 
-```text
-/path/to/sweetfold_env
-```
+Place these four files inside that folder:
 
-This is the Python or Conda environment where SweetFold/Boltz is installed.
+    /path/to/sweetfold_training/
+    ├── full.yaml
+    ├── train.py
+    ├── train.sh
+    └── update_checkpoint.py
 
-### SweetFold weights directory
-
-```text
-/path/to/sweetfold_env/weights
-```
-
-This is where the required checkpoint and metadata files should be placed.
-
-You may need to create this folder yourself.
-
-### Installed Boltz source-code directory
-
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-This is the installed `boltz` package folder inside the Python environment. This folder must be replaced with the SweetFold-modified `boltz` folder from:
-
-```text
-SweetFold/src/boltz
-```
-
-### SweetFold GitHub repository
-
-```text
-https://github.com/Keshav-Sundar-4/SweetFold
-```
-
-The SweetFold-modified Boltz folder is specifically located at:
-
-```text
-https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-```
-
-### Training dataset directory
-
-```text
-/path/to/glycan_dataset
-```
-
-This is the training dataset directory.
-
-### MSA directory
-
-```text
-/path/to/glycan_dataset/msa
-```
-
-This is the MSA directory corresponding to the training dataset.
-
-### Training output directory
-
-```text
-/path/to/training_outputs
-```
-
-This is where training outputs and checkpoints will be written.
+From this point onward, `/path/to/sweetfold_training` means the folder containing those four files.
 
 ---
 
-## 3. Create the SweetFold Training Environment
+## 2. Create the SweetFold Environment
 
-Create and activate a Python environment.
+Create a fresh Conda environment:
 
-Example using Conda:
+    conda create -n sweetfold_env python=3.10 -y
+    conda activate sweetfold_env
+    python -m pip install --upgrade pip
 
-```bash
-conda create -n sweetfold_env python=3.10 -y
-conda activate sweetfold_env
-python -m pip install --upgrade pip
-```
+Install Boltz v1.0.0 with CUDA support:
 
-Install Boltz v1.0.0 specifically with CUDA support:
-
-```bash
-pip install "boltz[cuda]==1.0.0"
-```
+    pip install "boltz[cuda]==1.0.0"
 
 Install helper packages if needed:
 
-```bash
-python -m pip install tqdm httpx scipy numpy pandas biopython
-```
+    python -m pip install tqdm httpx scipy numpy pandas biopython
 
 If RDKit is missing, install it with Conda:
 
-```bash
-conda install -c conda-forge rdkit -y
-```
+    conda install -c conda-forge rdkit -y
+
+Find the full path to the environment:
+
+    echo $CONDA_PREFIX
+
+In the rest of these instructions, that path is written as:
+
+    /path/to/sweetfold_env
+
+Replace `/path/to/sweetfold_env` with your actual environment path.
 
 ---
 
-## 4. Download and Install the SweetFold-Modified `boltz` Folder
+## 3. Download the SweetFold `boltz` Folder
 
-The SweetFold-modified Boltz source code lives inside the SweetFold GitHub repository at:
+Go to the SweetFold `boltz` folder on GitHub:
 
-```text
-https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-```
+    https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
 
-The folder path inside GitHub is:
+Download that folder.
 
-```text
-src/boltz
-```
+Place the downloaded folder somewhere convenient, for example:
 
-However, the folder copied into the Python environment must be named exactly:
+    /path/to/project/boltz
 
-```text
-boltz
-```
+The folder should be named:
 
-The final installed package path must be:
+    boltz
 
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
+---
 
-### Clone the full SweetFold repository
+## 4. Replace the Installed Boltz Folder
 
-```bash
-cd /path/to/project
-git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
-```
+Activate the SweetFold environment:
 
-After cloning, the SweetFold-modified Boltz folder will be located at:
+    conda activate sweetfold_env
 
-```text
-/path/to/project/sweetfold_repo/src/boltz
-```
+Find the installed Boltz folder:
 
-### Replace the installed Boltz folder
+    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
 
-Activate the environment:
+This will print something like:
 
-```bash
-conda activate sweetfold_env
-```
+    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-Find the installed Boltz source-code folder:
+Back up the original installed Boltz folder:
 
-```bash
-python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-```
+    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
 
-Back up the original Boltz folder:
+Copy the downloaded SweetFold `boltz` folder into the environment:
 
-```bash
-mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-```
+    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-Copy the SweetFold-modified Boltz folder into the environment:
+Verify that Python can import the replaced package:
 
-```bash
-cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-Verify the import:
-
-```bash
-python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
-```
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
 
 ---
 
 ## 5. Create the Weights Folder
 
-Create the weights folder inside the SweetFold environment:
+Create a weights folder inside the SweetFold environment:
 
-```bash
-mkdir -p /path/to/sweetfold_env/weights
-```
+    mkdir -p /path/to/sweetfold_env/weights
 
-The final weights folder should be:
+This folder must contain the checkpoint and metadata files required for training.
 
-```text
-/path/to/sweetfold_env/weights
-```
+The final folder should be:
 
-This folder is required because the training configuration points to checkpoint and metadata files inside it.
+    /path/to/sweetfold_env/weights
 
 ---
 
-## 6. Required Files for Training
+## 6. Download `boltz1_conf_converted.ckpt`
 
-The following files are required in the weights directory:
+Download `boltz1_conf_converted.ckpt` from Hugging Face:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-/path/to/sweetfold_env/weights/symmetry.pkl
-/path/to/sweetfold_env/weights/ccd.pkl
-```
+    https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
 
-The `full.yaml` file directly points to:
+Move it into the weights folder:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-/path/to/sweetfold_env/weights/symmetry.pkl
-```
+    /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
 
-The `ccd.pkl` file is also required by the Boltz/SweetFold codebase, even if it is not explicitly listed in `full.yaml`.
+Do not rename the file unless you also update every config file or script that points to it.
 
 ---
 
-## 7. Download `boltz1_conf_converted.ckpt`
+## 7. Add `symmetry.pkl` and `ccd.pkl`
 
-Download `boltz1_conf_converted.ckpt` manually from Hugging Face.
+Place these two files in the same weights folder:
 
-Open this link in a browser:
+    /path/to/sweetfold_env/weights/symmetry.pkl
+    /path/to/sweetfold_env/weights/ccd.pkl
 
-```text
-https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
-```
+The final weights folder should contain:
 
-On the Hugging Face page, click the download button for `boltz1_conf_converted.ckpt`.
+    /path/to/sweetfold_env/weights/
+    ├── boltz1_conf_converted.ckpt
+    ├── symmetry.pkl
+    └── ccd.pkl
 
-After downloading it, move the file into:
+The `full.yaml` file points directly to:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-```
+    boltz1_conf_converted.ckpt
+    symmetry.pkl
 
-Do not rename the file.
+The SweetFold/Boltz code also needs:
 
----
+    ccd.pkl
 
-## 8. Place `symmetry.pkl` and `ccd.pkl`
-
-Place the following two files in the same weights directory:
-
-```text
-/path/to/sweetfold_env/weights/symmetry.pkl
-/path/to/sweetfold_env/weights/ccd.pkl
-```
-
-The final weights directory should contain:
-
-```text
-/path/to/sweetfold_env/weights/
-├── boltz1_conf_converted.ckpt
-├── symmetry.pkl
-└── ccd.pkl
-```
-
-If the weights folder does not exist yet, create it first:
-
-```bash
-mkdir -p /path/to/sweetfold_env/weights
-```
+even if it is not always explicitly listed in `full.yaml`.
 
 ---
 
-## 9. Configure `full.yaml`
+## 8. Prepare the Training Dataset
 
-In `full.yaml`, update the output path:
+Your processed glycan dataset should already exist before training.
 
-```yaml
-output: /path/to/training_outputs
-```
+In these instructions, the dataset folder is written as:
 
-This directory controls where training outputs and checkpoints are saved.
+    /path/to/glycan_dataset
+
+The MSA folder should be:
+
+    /path/to/glycan_dataset/msa
+
+These are placeholders. Replace them with the real dataset paths on your system.
+
+---
+
+## 9. Create a Training Output Folder
+
+Choose or create a folder where training outputs should be written:
+
+    mkdir -p /path/to/training_outputs
+
+This folder will store logs and checkpoints.
+
+The latest checkpoint will usually be written to:
+
+    /path/to/training_outputs/checkpoints/last.ckpt
+
+---
+
+## 10. Configure `full.yaml`
+
+Open `full.yaml`.
+
+Update the output path:
+
+    output: /path/to/training_outputs
 
 Update the pretrained checkpoint path:
 
-```yaml
-pretrained: /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-```
+    pretrained: /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
 
 Update the dataset paths:
 
-```yaml
-target_dir: /path/to/glycan_dataset
-msa_dir: /path/to/glycan_dataset/msa
-```
+    target_dir: /path/to/glycan_dataset
+    msa_dir: /path/to/glycan_dataset/msa
 
 There are two `target_dir` fields in `full.yaml`. Both should point to the same glycan dataset directory:
 
-```yaml
-target_dir: /path/to/glycan_dataset
-```
+    target_dir: /path/to/glycan_dataset
 
 Update the symmetry file path:
 
-```yaml
-symmetries: /path/to/sweetfold_env/weights/symmetry.pkl
-```
-
-The training checkpoints generated during training will be saved under:
-
-```text
-/path/to/training_outputs/checkpoints/
-```
-
-The most recent checkpoint will usually be:
-
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
-```
+    symmetries: /path/to/sweetfold_env/weights/symmetry.pkl
 
 ---
 
-## 10. Configure `train.sh`
+## 11. Configure `train.sh`
 
-In `train.sh`, update the training directory:
+Open `train.sh`.
 
-```bash
-TRAINING_DIR="/path/to/sweetfold_training"
-```
+Set the training directory to the folder containing the four training files:
 
-This should be the folder containing:
+    TRAINING_DIR="/path/to/sweetfold_training"
 
-```text
-full.yaml
-train.py
-train.sh
-update_checkpoint.py
-```
+Set the SweetFold environment path:
 
-Update the SweetFold environment path:
+    SWEETFOLD_ENV="/path/to/sweetfold_env"
 
-```bash
-SWEETFOLD_ENV="/path/to/sweetfold_env"
-```
+The script should enter the training directory, activate the environment, and run:
 
-The script will enter the training directory, activate the environment, and run:
-
-```bash
-python train.py full.yaml
-```
+    python train.py full.yaml
 
 ---
 
-## 11. Running Training
+## 12. Run Training
 
-From the directory containing the four training files, submit the SLURM job:
+Submit the SLURM job from the training folder:
 
-```bash
-cd /path/to/sweetfold_training
-sbatch train.sh
-```
+    cd /path/to/sweetfold_training
+    sbatch train.sh
 
 Training outputs will be written to:
 
-```text
-/path/to/training_outputs
-```
+    /path/to/training_outputs
 
 Checkpoints will be written to:
 
-```text
-/path/to/training_outputs/checkpoints
-```
+    /path/to/training_outputs/checkpoints
 
 The latest checkpoint will usually be:
 
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
-```
+    /path/to/training_outputs/checkpoints/last.ckpt
 
 ---
 
-## 12. Create Final Checkpoints After Training
+## 13. Create Final Checkpoints After Training
 
 After training finishes, update the paths at the top of `update_checkpoint.py`.
 
 The base checkpoint should be:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-```
+    /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
 
 The trained checkpoint should usually be:
 
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
-```
+    /path/to/training_outputs/checkpoints/last.ckpt
 
 The inference checkpoint output should be:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_glycan.ckpt
-```
+    /path/to/sweetfold_env/weights/boltz1_glycan.ckpt
 
 The resume checkpoint output should be:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_glycan_resume.ckpt
-```
+    /path/to/sweetfold_env/weights/boltz1_glycan_resume.ckpt
 
-Then run:
+Run:
 
-```bash
-python update_checkpoint.py
-```
+    cd /path/to/sweetfold_training
+    python update_checkpoint.py
 
 This creates two checkpoint files.
 
-### Inference checkpoint
+The inference checkpoint is:
 
-```text
-boltz1_glycan.ckpt
-```
+    boltz1_glycan.ckpt
 
 Use this checkpoint for inference or future pretrained loading.
 
-### Resume checkpoint
+The resume checkpoint is:
 
-```text
-boltz1_glycan_resume.ckpt
-```
+    boltz1_glycan_resume.ckpt
 
 Use this checkpoint if you want to resume training.
 
 ---
 
-## 13. Training Setup Summary
+## 14. Training Setup Summary
 
-The overall training setup flow is:
+The training setup flow is:
 
-```bash
-# Create and activate environment
-conda create -n sweetfold_env python=3.10 -y
-conda activate sweetfold_env
-python -m pip install --upgrade pip
+    mkdir -p /path/to/sweetfold_training
 
-# Install Boltz v1.0.0 specifically
-pip install "boltz[cuda]==1.0.0"
+    conda create -n sweetfold_env python=3.10 -y
+    conda activate sweetfold_env
+    python -m pip install --upgrade pip
+    pip install "boltz[cuda]==1.0.0"
 
-# Install helper packages if needed
-python -m pip install tqdm httpx scipy numpy pandas biopython
-conda install -c conda-forge rdkit -y
+    python -m pip install tqdm httpx scipy numpy pandas biopython
+    conda install -c conda-forge rdkit -y
 
-# Clone SweetFold repository
-cd /path/to/project
-git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
+    echo $CONDA_PREFIX
 
-# Replace installed Boltz source code with SweetFold-modified Boltz
-python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
+    # Download the SweetFold boltz folder from:
+    # https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+    # Put it somewhere like:
+    # /path/to/project/boltz
 
-# Create weights folder
-mkdir -p /path/to/sweetfold_env/weights
+    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
 
-# Manually download boltz1_conf_converted.ckpt from:
-# https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
-# Then place it at:
-# /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
+    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-# Place symmetry.pkl and ccd.pkl in:
-# /path/to/sweetfold_env/weights/
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
 
-# Run training
-cd /path/to/sweetfold_training
-sbatch train.sh
+    mkdir -p /path/to/sweetfold_env/weights
 
-# After training, create final checkpoints
-python update_checkpoint.py
-```
+    # Download boltz1_conf_converted.ckpt from:
+    # https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
+    # Place it at:
+    # /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+
+    # Place symmetry.pkl and ccd.pkl in:
+    # /path/to/sweetfold_env/weights/
+
+    mkdir -p /path/to/training_outputs
+
+    cd /path/to/sweetfold_training
+    sbatch train.sh
+
+    python update_checkpoint.py
 
 ---
 
-## 14. Summary of Training Files
+## 15. Summary of Training Files
 
 | File | Purpose |
 |---|---|
