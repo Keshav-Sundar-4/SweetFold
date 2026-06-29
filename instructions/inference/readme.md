@@ -8,8 +8,6 @@ The SweetFold-modified Boltz source code is located here:
 
 https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
 
-Important: inside the SweetFold GitHub repository, the folder path is `src/boltz`. However, when copied into your Python environment, the folder must be named exactly `boltz`, not `src/boltz`.
-
 ---
 
 # Part 1: SweetFold Inference Setup Instructions
