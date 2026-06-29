@@ -1,538 +1,290 @@
-# SweetFold Glycan Dataset Processing Instructions
+# SweetFold Glycan Dataset Preprocessing Instructions
 
-These instructions explain how to set up the SweetFold/Boltz environment and run the glycan dataset processing pipeline from raw PDB discovery to final validation-set creation.
+This guide explains how to create the SweetFold glycan dataset from raw PDB structures.
 
-The scripts are written as standalone Python scripts. Some scripts can run in a normal Python environment, while others require the SweetFold/Boltz environment because they import `boltz`, `rdkit`, and related dependencies.
-
----
-
-## 1. Overview
-
-The full pipeline is:
-
-1. Create a SweetFold/Boltz Python environment.
-2. Install Boltz version `1.0.0` specifically.
-3. Download the SweetFold-modified `boltz` folder from the SweetFold GitHub repository.
-4. Replace the installed Boltz package folder with the SweetFold-modified `boltz` folder.
-5. Find PDB IDs that contain glycans.
-6. Download the matching PDB files.
-7. Clean protein-glycan PDB files.
-8. Separately extract or clean free-floating glycan structures.
-9. Combine the cleaned folders into one dataset folder.
-10. Convert cleaned `.pdb` files into Boltz/SweetFold `.npz` training structures.
-11. Create a validation ID file from the processed `.npz` files.
-
----
-
-## 2. Important Placeholder Paths
-
-Replace these placeholder paths with real paths on your machine or cluster.
-
-`/path/to/sweetfold_env`
-
-This is the Python or Conda environment where Boltz/SweetFold is installed.
-
-`/path/to/project`
-
-This is your working project folder where you want datasets, outputs, and scripts to live.
-
-`/path/to/project/scripts`
-
-This is where the processing scripts are stored.
-
-`/path/to/project/data`
-
-This is the parent folder for all generated datasets.
-
-`/path/to/project/sweetfold_repo`
-
-This is the local folder created if you clone the full SweetFold GitHub repository.
-
-`/path/to/project/sweetfold_repo/src/boltz`
-
-This is the SweetFold-modified Boltz source-code folder inside the SweetFold GitHub repository.
-
-`/path/to/project/boltz`
-
-This is the local folder path if you manually download only the SweetFold `src/boltz` folder and rename it to `boltz`.
-
-`/path/to/sweetfold_env/weights`
-
-This is where `ccd.pkl` or other required metadata/checkpoint files should be placed if a script requires them.
-
-`/path/to/sweetfold_env/lib/python3.10/site-packages/boltz`
-
-This is the installed `boltz` source-code folder inside the Python environment. This folder must be replaced with the SweetFold-modified `boltz` folder.
-
-Important: the exact `site-packages` path can vary by Python version and environment type. If you are unsure where `boltz` is installed, activate the environment and run:
-
-    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-
----
-
-## 3. Create and Install the SweetFold/Boltz Environment
-
-You must first create the environment and install Boltz before replacing the installed `boltz/` folder with the SweetFold-modified version.
-
-These instructions assume Conda and Python 3.10.
-
-    conda create -n sweetfold_env python=3.10 -y
-    conda activate sweetfold_env
-    python -m pip install --upgrade pip
-
-Install Boltz version `1.0.0` specifically:
-
-    python -m pip install boltz==1.0.0
-
-Install the additional helper packages used by the dataset scripts:
-
-    python -m pip install tqdm httpx scipy numpy pandas biopython
-
-RDKit may already be installed by Boltz. If RDKit is missing, install it with Conda:
-
-    conda install -c conda-forge rdkit -y
-
----
-
-## 4. Download the SweetFold `boltz` Folder
-
-The GitHub repository used here is specifically the SweetFold repository. SweetFold modifies the original Boltz source code, and the modified Boltz package lives inside the SweetFold repo at:
-
-https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-
-You do not need to download the entire repository if you only want the modified Boltz source folder. The important folder in the repository is:
-
-    src/boltz
-
-However, when you place this folder inside your Python environment, it must be named exactly:
-
-    boltz
-
-It should NOT be named:
-
-    src/boltz
-
-In other words, the final installed package path should look like this:
-
-    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-
-not this:
-
-    /path/to/sweetfold_env/lib/python3.10/site-packages/src/boltz
-
-### Option A: Download the Full SweetFold Repository
-
-This is the simplest and least error-prone option.
-
-    cd /path/to/project
-    git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
-
-After cloning, the SweetFold-modified Boltz folder will be located at:
-
-    /path/to/project/sweetfold_repo/src/boltz
-
-This is the folder that will replace the installed Boltz package.
-
-### Option B: Download Only the `src/boltz` Folder
-
-GitHub does not provide a simple one-click command for downloading only one folder using plain `git clone`.
-
-If you download the folder manually from:
-
-    https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
-
-make sure the downloaded folder is named exactly:
-
-    boltz
-
-If the download gives you a nested folder structure like this:
-
-    src/boltz
-
-then move or rename it so that the final folder you copy is simply:
-
-    boltz
-
-For example, your local folder should become:
-
-    /path/to/project/boltz
-
-or, if you cloned the full repository:
-
-    /path/to/project/sweetfold_repo/src/boltz
-
-Both are fine as long as the actual folder copied into `site-packages` is named `boltz`.
-
----
-
-## 5. Replace the Installed Boltz Folder with the SweetFold Boltz Folder
-
-Before replacing anything, activate the SweetFold environment:
-
-    conda activate sweetfold_env
-
-Find the installed Boltz package location:
-
-    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-
-This will print something like:
-
-    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-
-Back up the original installed Boltz folder:
-
-    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-
-Now copy the SweetFold-modified Boltz folder into the environment.
-
-If you cloned the full SweetFold repository, run:
-
-    cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-
-If you manually downloaded only the SweetFold `boltz` folder, run:
-
-    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-
-Important: after copying, the final folder must be:
-
-    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-
-It must not be:
-
-    /path/to/sweetfold_env/lib/python3.10/site-packages/src/boltz
-
-Verify that Python can import the replaced SweetFold-modified Boltz package:
-
-    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
-
-The printed path should point to the new `boltz` folder inside your SweetFold environment.
-
----
-
-## 6. Suggested Project Folder Layout
-
-A clean project layout is:
-
-    /path/to/project/
-    ├── scripts/
-    │   ├── pdb_api_call.py
-    │   ├── pdb_api.py
-    │   ├── phase1_cleaner.py
-    │   ├── free_glycan_data.py
-    │   ├── lectinz_clean.py
-    │   ├── preprocess_glycans.py
-    │   └── validation_dataset_creation.py
-    ├── data/
-    │   ├── pdb_id_lists/
-    │   ├── raw_pdb_downloads/
-    │   ├── phase1_cleaned_pdbs/
-    │   ├── free_glycan_raw_pdbs/
-    │   ├── free_glycan_cleaned_pdbs/
-    │   ├── lectinz_cleaned_pdbs/
-    │   ├── combined_cleaned_pdbs/
-    │   └── final_processed_dataset/
-    └── sweetfold_repo/
-
-You can use different names, but the pipeline is much easier to debug if every output folder has a clear name.
-
----
-
-## 7. Scripts That Do Not Require the SweetFold Environment
-
-The first two scripts do not require the SweetFold/Boltz environment.
-
-They can be run in a normal Python environment as long as the required packages are installed.
-
-Install basic local dependencies if needed:
-
-    python -m pip install tqdm httpx
-
-These scripts are:
+The preprocessing pipeline uses these scripts:
 
     pdb_api_call.py
     pdb_api.py
-
----
-
-## 8. Scripts That Require the SweetFold Environment
-
-The later scripts should be run after activating the SweetFold environment:
-
-    conda activate sweetfold_env
-
-These scripts require the SweetFold/Boltz environment:
-
     phase1_cleaner.py
     free_glycan_data.py
     lectinz_clean.py
     preprocess_glycans.py
     validation_dataset_creation.py
 
-`free_glycan_data.py` may work outside the environment if its dependencies are installed, but it is simplest to run it inside the SweetFold environment.
+---
+
+## 1. Install Boltz v1.0.0
+
+Create a fresh Python or Conda environment.
+
+Install Boltz v1.0.0:
+
+    pip install "boltz[cuda]==1.0.0"
+
+Install any additional dependencies required by the scripts, including RDKit, NumPy, SciPy, pandas, tqdm, Biopython, HTTPX, and any other missing package.
 
 ---
 
-## 9. Step-by-Step Pipeline
+## 2. Download the SweetFold `boltz` Folder
 
-### Step 1: Find PDB IDs Containing Glycans
+Download the SweetFold `boltz` folder from GitHub:
+
+    https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+
+---
+
+## 3. Replace the Installed Boltz Folder
+
+Locate the installed `boltz` source-code folder inside your environment.
+
+Replace that installed `boltz` folder with the SweetFold `boltz` folder downloaded from GitHub.
+
+The folder should still be named:
+
+    boltz
+
+---
+
+## 4. Create a `weights` Folder
+
+Create a folder named:
+
+    weights
+
+inside the SweetFold environment.
+
+---
+
+## 5. Download `ccd.pkl`
+
+Download `ccd.pkl`:
+
+    https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/ccd.pkl
+
+Place it inside the `weights` folder.
+
+Do not rename it.
+
+---
+
+## 6. Put the Preprocessing Scripts Together
+
+Place these scripts in the same working directory:
+
+    pdb_api_call.py
+    pdb_api.py
+    phase1_cleaner.py
+    free_glycan_data.py
+    lectinz_clean.py
+    preprocess_glycans.py
+    validation_dataset_creation.py
+
+This folder is the preprocessing scripts directory.
+
+---
+
+## 7. Create a Data Folder
+
+Create a data folder for all preprocessing outputs.
+
+A clean layout is:
+
+    glycan_data/
+    ├── pdb_id_lists/
+    ├── raw_pdb_downloads/
+    ├── phase1_cleaned_pdbs/
+    ├── free_glycan_cleaned_pdbs/
+    ├── md_glycan_raw_pdbs/
+    ├── md_glycan_cleaned_pdbs/
+    ├── combined_cleaned_pdbs/
+    └── final_processed_dataset/
+
+---
+
+## 8. Find PDB IDs Containing Glycans
 
 Script:
 
     pdb_api_call.py
 
-Purpose:
+Open `pdb_api_call.py`.
 
-This script queries the RCSB PDB API and writes a text file containing PDB IDs that contain glycan CCD codes and satisfy the resolution cutoff.
+Set:
 
-Before running, edit the configuration near the top of `pdb_api_call.py`:
-
-    OUT_DIR = Path("/path/to/project/data/pdb_id_lists")
+    OUT_DIR = Path("/path/to/glycan_data/pdb_id_lists")
     OUT_FILE = OUT_DIR / "pdb_ids_with_glycans.txt"
 
 Run:
 
-    cd /path/to/project/scripts
     python pdb_api_call.py
 
-Expected output:
+Output:
 
-    /path/to/project/data/pdb_id_lists/pdb_ids_with_glycans.txt
+    glycan_data/pdb_id_lists/pdb_ids_with_glycans.txt
 
 ---
 
-### Step 2: Download the Matching PDB Files
+## 9. Download the PDB Files
 
 Script:
 
     pdb_api.py
 
-Purpose:
+Open `pdb_api.py`.
 
-This script reads the PDB ID text file from Step 1 and downloads the matching `.pdb` files.
+Set:
 
-Before running, edit the configuration near the top of `pdb_api.py`:
-
-    PDB_ID_FILE = Path("/path/to/project/data/pdb_id_lists/pdb_ids_with_glycans.txt")
-    OUTPUT_DIR = Path("/path/to/project/data/raw_pdb_downloads")
+    PDB_ID_FILE = Path("/path/to/glycan_data/pdb_id_lists/pdb_ids_with_glycans.txt")
+    OUTPUT_DIR = Path("/path/to/glycan_data/raw_pdb_downloads")
 
 Run:
 
-    cd /path/to/project/scripts
     python pdb_api.py
 
-Expected output:
+Output:
 
-    /path/to/project/data/raw_pdb_downloads/
-
-This folder should contain downloaded `.pdb` files.
+    glycan_data/raw_pdb_downloads/
 
 ---
 
-### Step 3a: Clean Protein-Glycan PDB Files
+## 10. Clean Protein-Glycan PDB Files
 
 Script:
 
     phase1_cleaner.py
 
-Purpose:
+Open `phase1_cleaner.py`.
 
-This script cleans raw protein-glycan PDB files. It removes irrelevant atoms, keeps valid protein and glycan residues, resolves alternate conformations, checks for clashes, removes invalid glycan components, and writes cleaned PDB files.
+Set:
 
-Activate the SweetFold environment first:
-
-    conda activate sweetfold_env
-
-Before running, edit the hardcoded configuration near the top of `phase1_cleaner.py`:
-
-    INPUT_FOLDER = "/path/to/project/data/raw_pdb_downloads"
-    OUTPUT_FOLDER = "/path/to/project/data/phase1_cleaned_pdbs"
+    INPUT_FOLDER = "/path/to/glycan_data/raw_pdb_downloads"
+    OUTPUT_FOLDER = "/path/to/glycan_data/phase1_cleaned_pdbs"
 
 Run:
 
-    cd /path/to/project/scripts
     python phase1_cleaner.py
 
-Expected output:
+Output:
 
-    /path/to/project/data/phase1_cleaned_pdbs/
+    glycan_data/phase1_cleaned_pdbs/
 
 ---
 
-### Step 3b: Generate Free-Floating Glycan Data
+## 11. Generate Free-Floating Glycan Files
 
 Script:
 
     free_glycan_data.py
 
-Purpose:
-
-This script extracts glycan-only structures from PDB files that contain glycans but no protein residues. It removes hydrogens, removes non-glycan atoms, splits disconnected glycan components, and writes each glycan component as its own PDB file.
-
-This script uses command-line arguments, so you do not need to edit paths inside the script.
-
 Run:
 
-    conda activate sweetfold_env
-    cd /path/to/project/scripts
-
     python free_glycan_data.py \
-      --input_folder /path/to/project/data/raw_pdb_downloads \
-      --output_folder /path/to/project/data/free_glycan_cleaned_pdbs
+      --input_folder /path/to/glycan_data/raw_pdb_downloads \
+      --output_folder /path/to/glycan_data/free_glycan_cleaned_pdbs
 
-Expected output:
+Output:
 
-    /path/to/project/data/free_glycan_cleaned_pdbs/
-
-Note:
-
-If you only use the PDB-derived dataset, you may get a relatively small number of free-floating glycans. If you also have an MD-derived glycan dataset, process that as well and add it to the combined dataset later.
+    glycan_data/free_glycan_cleaned_pdbs/
 
 ---
 
-### Step 3c: Clean MD-Derived or Nonstandard Glycan PDB Files
+## 12. Clean MD-Derived Glycan Files
 
 Script:
 
     lectinz_clean.py
 
-Purpose:
+Skip this step if you do not have MD-derived or nonstandard glycan PDB files.
 
-This script is designed for MD-derived or otherwise nonstandard glycan PDB files. It removes hydrogens, normalizes atom names, merges fragmented monosaccharide residues, checks against the CCD dictionary, and writes cleaned PDB files.
+Open `lectinz_clean.py`.
 
-Before running, edit the configuration near the top of `lectinz_clean.py`:
+Set:
 
-    TARGET_FOLDER = Path("/path/to/project/data/free_glycan_raw_pdbs")
-    OUTPUT_FOLDER = Path("/path/to/project/data/lectinz_cleaned_pdbs")
+    TARGET_FOLDER = Path("/path/to/glycan_data/md_glycan_raw_pdbs")
+    OUTPUT_FOLDER = Path("/path/to/glycan_data/md_glycan_cleaned_pdbs")
     CCD_FILE = Path("/path/to/sweetfold_env/weights/ccd.pkl")
 
 Run:
 
-    conda activate sweetfold_env
-    cd /path/to/project/scripts
     python lectinz_clean.py
 
-Expected output:
+Output:
 
-    /path/to/project/data/lectinz_cleaned_pdbs/
-
-If you do not have MD-derived or nonstandard glycan PDB files, you can skip this step.
+    glycan_data/md_glycan_cleaned_pdbs/
 
 ---
 
-### Step 3d: Combine the Cleaned PDB Folders
+## 13. Combine Cleaned PDB Files
 
-Purpose:
+Combine the cleaned PDB files into one folder:
 
-The preprocessing script expects one folder of cleaned `.pdb` files. Combine the cleaned protein-glycan files, free-floating glycan files, and optional MD-cleaned glycan files into one folder.
+    glycan_data/combined_cleaned_pdbs/
 
-Create the combined folder:
+Include files from:
 
-    mkdir -p /path/to/project/data/combined_cleaned_pdbs
+    glycan_data/phase1_cleaned_pdbs/
+    glycan_data/free_glycan_cleaned_pdbs/
+    glycan_data/md_glycan_cleaned_pdbs/
 
-Copy protein-glycan cleaned files:
-
-    cp /path/to/project/data/phase1_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-
-Copy free-floating glycan files:
-
-    cp /path/to/project/data/free_glycan_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-
-Optional: copy MD/nonstandard cleaned glycan files:
-
-    cp /path/to/project/data/lectinz_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-
-Expected combined folder:
-
-    /path/to/project/data/combined_cleaned_pdbs/
+Skip the MD-derived folder if you did not use it.
 
 ---
 
-### Step 4: Convert Cleaned PDB Files into `.npz` Dataset Files
+## 14. Convert Cleaned PDB Files into `.npz` Files
 
 Script:
 
     preprocess_glycans.py
 
-Purpose:
-
-This script converts cleaned `.pdb` files into Boltz/SweetFold-compatible `.npz` structure files and JSON records.
-
-Important:
-
-This step requires the SweetFold/Boltz environment and the replaced SweetFold `boltz/` folder.
-
 Run:
 
-    conda activate sweetfold_env
-    cd /path/to/project/scripts
-
     python preprocess_glycans.py \
-      --datadir /path/to/project/data/combined_cleaned_pdbs \
+      --datadir /path/to/glycan_data/combined_cleaned_pdbs \
       --ccd-path /path/to/sweetfold_env/weights/ccd.pkl \
-      --outdir /path/to/project/data/final_processed_dataset \
+      --outdir /path/to/glycan_data/final_processed_dataset \
       --num-processes 8
 
-Arguments:
+Output:
 
-`--datadir`
+    glycan_data/final_processed_dataset/
+    ├── structures/
+    ├── records/
+    └── manifest.json
 
-Folder containing the cleaned `.pdb` files.
-
-`--ccd-path`
-
-Path to the `ccd.pkl` file.
-
-`--outdir`
-
-Output folder for the processed dataset.
-
-`--num-processes`
-
-Number of CPU processes to use. Use a smaller number if your machine has limited RAM.
-
-Expected output:
-
-    /path/to/project/data/final_processed_dataset/structures/
-    /path/to/project/data/final_processed_dataset/records/
-    /path/to/project/data/final_processed_dataset/manifest.json
-
-The `structures/` folder should contain `.npz` files.
+Use fewer processes if memory is limited.
 
 ---
 
-### Step 5: Create the Validation ID File
+## 15. Create the Validation ID File
 
 Script:
 
     validation_dataset_creation.py
 
-Purpose:
+Open `validation_dataset_creation.py`.
 
-This script randomly selects a fraction of processed `.npz` files and writes their IDs to a validation text file.
+Set:
 
-Before running, edit the configuration near the top of `validation_dataset_creation.py`:
-
-    NPZ_DIR = "/path/to/project/data/final_processed_dataset/structures"
-    OUTPUT_FILE = "/path/to/project/data/final_processed_dataset/validation_ids.txt"
+    NPZ_DIR = "/path/to/glycan_data/final_processed_dataset/structures"
+    OUTPUT_FILE = "/path/to/glycan_data/final_processed_dataset/validation_ids.txt"
     VALIDATION_SET_FRACTION = 0.05
 
 Run:
 
-    conda activate sweetfold_env
-    cd /path/to/project/scripts
     python validation_dataset_creation.py
 
-Expected output:
+Output:
 
-    /path/to/project/data/final_processed_dataset/validation_ids.txt
+    glycan_data/final_processed_dataset/validation_ids.txt
 
 ---
 
-## 10. Final Expected Dataset Folder
+## 16. Final Dataset Layout
 
-After the full pipeline, the final processed dataset should look like:
+The final processed dataset should look like:
 
-    /path/to/project/data/final_processed_dataset/
+    final_processed_dataset/
     ├── structures/
     │   ├── example_1.npz
     │   ├── example_2.npz
@@ -546,90 +298,14 @@ After the full pipeline, the final processed dataset should look like:
 
 ---
 
-## 11. Full Command Summary
+## 17. Script Summary
 
-The overall command flow is:
-
-    # Create and activate the environment
-    conda create -n sweetfold_env python=3.10 -y
-    conda activate sweetfold_env
-    python -m pip install --upgrade pip
-    python -m pip install boltz==1.0.0
-    python -m pip install tqdm httpx scipy numpy pandas biopython
-    conda install -c conda-forge rdkit -y
-
-    # Download the full SweetFold repository
-    cd /path/to/project
-    git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
-
-    # Replace installed Boltz with the SweetFold-modified Boltz folder
-    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
-    mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-    cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
-
-    # Step 1: Get PDB IDs
-    cd /path/to/project/scripts
-    python pdb_api_call.py
-
-    # Step 2: Download PDB files
-    python pdb_api.py
-
-    # Step 3a: Clean protein-glycan PDB files
-    python phase1_cleaner.py
-
-    # Step 3b: Extract free-floating glycans
-    python free_glycan_data.py \
-      --input_folder /path/to/project/data/raw_pdb_downloads \
-      --output_folder /path/to/project/data/free_glycan_cleaned_pdbs
-
-    # Step 3c: Optional MD/nonstandard glycan cleanup
-    python lectinz_clean.py
-
-    # Step 3d: Combine cleaned folders
-    mkdir -p /path/to/project/data/combined_cleaned_pdbs
-    cp /path/to/project/data/phase1_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-    cp /path/to/project/data/free_glycan_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-    cp /path/to/project/data/lectinz_cleaned_pdbs/*.pdb /path/to/project/data/combined_cleaned_pdbs/
-
-    # Step 4: Preprocess into NPZ dataset
-    python preprocess_glycans.py \
-      --datadir /path/to/project/data/combined_cleaned_pdbs \
-      --ccd-path /path/to/sweetfold_env/weights/ccd.pkl \
-      --outdir /path/to/project/data/final_processed_dataset \
-      --num-processes 8
-
-    # Step 5: Create validation IDs
-    python validation_dataset_creation.py
-
----
-
-## 12. File Descriptions
-
-### `pdb_api_call.py`
-
-Finds PDB entries that contain at least one allowed glycan CCD code and satisfy the resolution cutoff. It writes the matching PDB IDs to a text file.
-
-### `pdb_api.py`
-
-Reads a text file of PDB IDs and downloads the corresponding `.pdb` files from RCSB.
-
-### `phase1_cleaner.py`
-
-Cleans raw protein-glycan PDB files. It keeps protein and glycan residues, removes unrelated atoms, handles alternate conformations, checks for atomic clashes, removes invalid glycan components, and writes cleaned PDB files.
-
-### `free_glycan_data.py`
-
-Extracts free-floating glycan-only structures from PDB files. It removes hydrogens, removes non-glycan atoms, splits disconnected glycan components, and writes each glycan component as a separate PDB file.
-
-### `lectinz_clean.py`
-
-Cleans MD-derived or nonstandard glycan PDB files. It removes hydrogens, normalizes atom names, merges fragmented monosaccharide residues, checks residue completeness using `ccd.pkl`, and writes corrected PDB files.
-
-### `preprocess_glycans.py`
-
-Converts cleaned `.pdb` files into SweetFold/Boltz-compatible `.npz` files. It parses atoms, residues, chains, glycan connectivity, glycosylation sites, anomeric configuration, and writes both structure files and JSON records.
-
-### `validation_dataset_creation.py`
-
-Randomly selects a fraction of the processed `.npz` files and writes their IDs to a validation text file.
+| Script | Purpose |
+|---|---|
+| `pdb_api_call.py` | Finds PDB IDs containing glycans. |
+| `pdb_api.py` | Downloads PDB files from the PDB IDs. |
+| `phase1_cleaner.py` | Cleans protein-glycan PDB files. |
+| `free_glycan_data.py` | Extracts free-floating glycan-only PDB files. |
+| `lectinz_clean.py` | Cleans MD-derived or nonstandard glycan PDB files. |
+| `preprocess_glycans.py` | Converts cleaned PDB files into `.npz` dataset files. |
+| `validation_dataset_creation.py` | Creates the validation ID file. |
