@@ -1,150 +1,85 @@
 # SweetFold Training Setup Instructions
 
-This guide explains how to set up and run SweetFold training using four files:
+SweetFold training uses four files:
 
-```text
+```
 full.yaml
 train.py
 train.sh
 update_checkpoint.py
 ```
 
-All file paths below are written as general placeholders. Before running training, replace every `/path/to/...` path with the correct absolute path on your system.
+Training requires:
+
+1. Boltz v1.0.0 installed.
+2. The installed Boltz source-code folder replaced with SweetFold’s `boltz` folder.
+3. A `weights` folder containing the required checkpoint and metadata files.
+4. A processed glycan training dataset.
+5. A configured output directory for training checkpoints.
+6. The four training files listed above.
 
 ---
 
-## 1. Expected File Layout
+## 1. Install Boltz v1.0.0
 
-Place the following four files in the same working directory:
+Create a fresh Python or Conda environment for SweetFold training.
 
-```text
-/path/to/sweetfold_training/
-├── full.yaml
-├── train.py
-├── train.sh
-└── update_checkpoint.py
+Inside that environment, install Boltz v1.0.0 exactly:
+
+```
+pip install "boltz[cuda]==1.0.0"
 ```
 
-For example, if your working directory is:
+Use this exact version.
 
-```text
-/path/to/sweetfold_training/
-```
-
-then all commands should be run from inside that folder unless otherwise specified.
+Install any additional dependencies required by your system or scripts, such as RDKit, NumPy, SciPy, pandas, tqdm, Biopython, and HTTPX.
 
 ---
 
-## 2. Important Paths
+## 2. Download the SweetFold `boltz` Folder
 
-The instructions use the following general paths.
+Download the SweetFold `boltz` folder from GitHub:
 
-### SweetFold environment
-
-```text
-/path/to/sweetfold_env
+```
+https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
 ```
 
-This is the Python or Conda environment where SweetFold/Boltz is installed.
-
-### SweetFold weights directory
-
-```text
-/path/to/sweetfold_env/weights
-```
-
-This is where the required checkpoint and metadata files should be placed.
-
-### Installed Boltz source-code directory
-
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-```
-
-This is the installed `boltz` package folder inside the Python environment. This folder must be replaced with the `boltz/` folder from the SweetFold GitHub repository.
-
-### Training dataset directory
-
-```text
-/path/to/glycan_dataset
-```
-
-This is the training dataset directory.
-
-### MSA directory
-
-```text
-/path/to/glycan_dataset/msa
-```
-
-This is the MSA directory corresponding to the training dataset.
-
-### Training output directory
-
-```text
-/path/to/training_outputs
-```
-
-This is where training outputs and checkpoints will be written.
+This is the SweetFold-modified version of the Boltz source code.
 
 ---
 
-## 3. Required Files for Training
+## 3. Replace the Installed Boltz Folder
 
-The following files are required in the weights directory:
+After installing Boltz v1.0.0, locate the installed `boltz` source-code folder inside your environment.
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-/path/to/sweetfold_env/weights/symmetry.pkl
-/path/to/sweetfold_env/weights/ccd.pkl
+Replace that installed `boltz` folder with the SweetFold `boltz` folder downloaded from GitHub.
+
+The folder name should remain:
+
+```
+boltz
 ```
 
-The `full.yaml` file directly points to:
-
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
-/path/to/sweetfold_env/weights/symmetry.pkl
-```
-
-The `ccd.pkl` file is also required by the Boltz/SweetFold codebase, even if it is not explicitly listed in `full.yaml`.
+This replacement is required because SweetFold training depends on the SweetFold-modified Boltz source code.
 
 ---
 
-## 4. Download `boltz1_conf_converted.ckpt`
+## 4. Create a Weights Folder
 
-Download `boltz1_conf_converted.ckpt` manually from Hugging Face using the website.
+Create a folder named:
 
-Open this link in a browser:
-
-```text
-https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
+```
+weights
 ```
 
-On the Hugging Face page, click the download button for `boltz1_conf_converted.ckpt`.
+inside the SweetFold environment.
 
-After downloading it, move the file into:
+This folder should contain the checkpoint and metadata files required for training.
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+The final `weights` folder should contain:
+
 ```
-
-Do not rename the file.
-
----
-
-## 5. Place `symmetry.pkl` and `ccd.pkl`
-
-Place the following two files in the same weights directory:
-
-```text
-/path/to/sweetfold_env/weights/symmetry.pkl
-/path/to/sweetfold_env/weights/ccd.pkl
-```
-
-The final weights directory should contain:
-
-```text
-/path/to/sweetfold_env/weights/
+weights/
 ├── boltz1_conf_converted.ckpt
 ├── symmetry.pkl
 └── ccd.pkl
@@ -152,188 +87,221 @@ The final weights directory should contain:
 
 ---
 
-## 6. Replace the Installed `boltz` Folder
+## 5. Download `boltz1_conf_converted.ckpt`
 
-After installing the environment, locate the installed `boltz` package folder:
+Download `boltz1_conf_converted.ckpt` from Hugging Face:
 
-```text
-/path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+```
+https://huggingface.co/Keshav-Sundar-4/SweetFold/blob/main/boltz1_conf_converted.ckpt
 ```
 
-Replace this folder with the `boltz/` folder from the SweetFold GitHub repository.
+Place it inside the `weights` folder.
 
-This step is required because the SweetFold version of the `boltz` source code contains the glycan-specific training changes. If the original Boltz package is left in place, the training code may not match the SweetFold checkpoint or dataset format.
+Do not rename this file unless you also update every config file or script that points to it.
 
 ---
 
-## 7. Configure `full.yaml`
+## 6. Add `symmetry.pkl` and `ccd.pkl`
 
-In `full.yaml`, update the output path:
+Place the following files in the same `weights` folder:
 
-```yaml
-output: /path/to/training_outputs
+```
+symmetry.pkl
+ccd.pkl
 ```
 
-This directory controls where training outputs and checkpoints are saved.
+The training configuration directly points to:
 
-Update the pretrained checkpoint path:
-
-```yaml
-pretrained: /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+```
+boltz1_conf_converted.ckpt
+symmetry.pkl
 ```
 
-Update the dataset paths:
+The SweetFold/Boltz code also requires:
 
-```yaml
-target_dir: /path/to/glycan_dataset
-msa_dir: /path/to/glycan_dataset/msa
+```
+ccd.pkl
 ```
 
-There are two `target_dir` fields in `full.yaml`. Both should point to the same glycan dataset directory:
-
-```yaml
-target_dir: /path/to/glycan_dataset
-```
-
-Update the symmetry file path:
-
-```yaml
-symmetries: /path/to/sweetfold_env/weights/symmetry.pkl
-```
-
-The training checkpoints generated during training will be saved under:
-
-```text
-/path/to/training_outputs/checkpoints/
-```
-
-The most recent checkpoint will usually be:
-
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
-```
+even if it is not explicitly listed in `full.yaml`.
 
 ---
 
-## 8. Configure `train.sh`
+## 7. Prepare the Training Files
 
-In `train.sh`, update the training directory: 
+Place the following four files in the same working directory:
 
-```bash
-TRAINING_DIR="/path/to/sweetfold_training"
 ```
-
-This should be the folder containing:
-
-```text
 full.yaml
 train.py
 train.sh
 update_checkpoint.py
 ```
 
-Update the SweetFold environment path:
+This folder is the SweetFold training directory.
 
-```bash
-SWEETFOLD_ENV="/path/to/sweetfold_env"
+Run training from this directory unless your shell script is configured otherwise.
+
+---
+
+## 8. Prepare the Training Dataset
+
+Before running training, prepare the processed glycan dataset.
+
+The dataset should contain the structure files and metadata expected by SweetFold/Boltz training.
+
+A typical processed dataset should look like:
+
+```
+glycan_dataset/
+├── structures/
+├── records/
+├── manifest.json
+├── validation_ids.txt
+└── msa/
 ```
 
-The script will enter the training directory, activate the environment, and run:
+The `msa` folder should correspond to the same dataset used for training.
 
-```bash
+---
+
+## 9. Choose a Training Output Directory
+
+Choose a directory where training outputs and checkpoints will be saved.
+
+This directory is controlled by the `output` field in `full.yaml`.
+
+During training, checkpoints will be written under:
+
+```
+training_outputs/checkpoints/
+```
+
+The latest checkpoint will usually be:
+
+```
+training_outputs/checkpoints/last.ckpt
+```
+
+---
+
+## 10. Configure `full.yaml`
+
+Open `full.yaml` and update the training output location:
+
+```
+output: /path/to/training_outputs
+```
+
+Update the pretrained checkpoint path so it points to the converted Boltz checkpoint inside the `weights` folder:
+
+```
+pretrained: /path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+```
+
+Update the dataset paths:
+
+```
+target_dir: /path/to/glycan_dataset
+msa_dir: /path/to/glycan_dataset/msa
+```
+
+There are two `target_dir` fields in `full.yaml`.
+
+Both should point to the same processed glycan dataset directory:
+
+```
+target_dir: /path/to/glycan_dataset
+```
+
+Update the symmetry file path so it points to `symmetry.pkl` inside the `weights` folder:
+
+```
+symmetries: /path/to/sweetfold_env/weights/symmetry.pkl
+```
+
+---
+
+## 11. Configure `train.sh`
+
+Open `train.sh`.
+
+Set the training directory to the folder containing:
+
+```
+full.yaml
+train.py
+train.sh
+update_checkpoint.py
+```
+
+Set the SweetFold environment path to the environment where Boltz v1.0.0 was installed and where the SweetFold `boltz` folder replacement was performed.
+
+The script should activate the SweetFold environment, enter the training directory, and run:
+
+```
 python train.py full.yaml
 ```
 
 ---
 
-## 9. Running Training
+## 12. Run Training
 
-From the directory containing the four training files, submit the SLURM job:
+Submit or run `train.sh` according to your system’s normal workflow.
 
-```bash
-cd /path/to/sweetfold_training
-sbatch train.sh
+For SLURM-based HPC systems, this usually means submitting the shell script as a job.
+
+Training outputs will be written to the output directory specified in `full.yaml`.
+
+The latest checkpoint will usually be saved as:
+
 ```
-
-Training outputs will be written to:
-
-```text
-/path/to/training_outputs
-```
-
-Checkpoints will be written to:
-
-```text
-/path/to/training_outputs/checkpoints
-```
-
-The latest checkpoint will usually be:
-
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
+training_outputs/checkpoints/last.ckpt
 ```
 
 ---
 
-## 10. Create Final Checkpoints After Training
+## 13. Create Final Checkpoints After Training
 
-After training finishes, update the paths at the top of `update_checkpoint.py`.
+After training finishes, use `update_checkpoint.py` to create the final inference and resume checkpoints.
+
+Before running it, update the paths at the top of `update_checkpoint.py`.
 
 The base checkpoint should be:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_conf_converted.ckpt
+```
+boltz1_conf_converted.ckpt
 ```
 
 The trained checkpoint should usually be:
 
-```text
-/path/to/training_outputs/checkpoints/last.ckpt
+```
+last.ckpt
 ```
 
-The inference checkpoint output should be:
+The final inference checkpoint should be named:
 
-```text
-/path/to/sweetfold_env/weights/boltz1_glycan.ckpt
 ```
-
-The resume checkpoint output should be:
-
-```text
-/path/to/sweetfold_env/weights/boltz1_glycan_resume.ckpt
-```
-
-Then run:
-
-```bash
-python update_checkpoint.py
-```
-
-This creates two checkpoint files.
-
-### Inference checkpoint
-
-```text
 boltz1_glycan.ckpt
 ```
 
-Use this checkpoint for inference or future pretrained loading.
+The final resume checkpoint should be named:
 
-### Resume checkpoint
-
-```text
+```
 boltz1_glycan_resume.ckpt
 ```
 
-Use this checkpoint if you want to resume training.
+The inference checkpoint is used for inference or future pretrained loading.
+
+The resume checkpoint is used if you want to resume training.
 
 ---
 
-## 11. Summary of Files
+## 14. Summary of Training Files
 
-| File | Purpose |
-|---|---|
-| `full.yaml` | Main training configuration. Controls dataset paths, output directory, checkpoint paths, model settings, and training hyperparameters. |
-| `train.py` | Python training entry point. Loads `full.yaml`, initializes the model and data module, loads pretrained weights, and starts PyTorch Lightning training. |
-| `train.sh` | SLURM job script. Requests GPUs, activates the environment, enters the working directory, and runs `python train.py full.yaml`. |
-| `update_checkpoint.py` | Post-training checkpoint utility. Merges the trained checkpoint with the base checkpoint to create inference and resume checkpoints. |
+| File                   | Purpose                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `full.yaml`            | Main training configuration. Controls dataset paths, output directory, checkpoint paths, model settings, and training hyperparameters.                  |
+| `train.py`             | Python training entry point. Loads `full.yaml`, initializes the model and data module, loads pretrained weights, and starts PyTorch Lightning training. |
+| `train.sh`             | Shell script for launching training. Usually used for HPC or SLURM jobs.                                                                                |
+| `update_checkpoint.py` | Post-training checkpoint utility. Creates final inference and resume checkpoints from the trained checkpoint.                                           |
