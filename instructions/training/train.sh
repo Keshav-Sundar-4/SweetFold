@@ -1,26 +1,44 @@
 #!/bin/bash
-#SBATCH -A hagan-lab
-#SBATCH -p hagan-gpu
+#SBATCH -A your-account-name
+#SBATCH -p your-gpu-partition
 #SBATCH --gres=gpu:H100:4
-#SBATCH --job-name=boltz_glycanbias_module_training_4GPU
+#SBATCH --job-name=sweetfold_training_4gpu
 #SBATCH --time=5-00:00:00
 
-# Ensure the output directory exists (optional, train.py does it too)
-# mkdir -p /work/keshavsundar/work_sundar/glycan_test
+set -euo pipefail
 
-# Load necessary modules (if applicable on your cluster)
-# The following line loads the CUDA module version 12.4 and ignores any cached version.
+# ---------------------------------------------------------------------
+# User-configurable paths
+# ---------------------------------------------------------------------
+
+# Directory containing full.yaml, train.py, train.sh, and update_checkpoint.py
+TRAINING_DIR="/path/to/sweetfold_training"
+
+# Conda or Python environment containing the SweetFold/Boltz installation
+SWEETFOLD_ENV="/path/to/sweetfold_env"
+
+# ---------------------------------------------------------------------
+# Environment setup
+# ---------------------------------------------------------------------
+
 module --ignore-cache load cuda/12.4
-# You can also load additional modules, for example:
-# module load anaconda/XXXX.XX
 
-echo "Loading Conda environment..."
-source activate /work/keshavsundar/env/sweetfold
-echo "Conda environment loaded. Starting training..."
+echo "Changing to training directory:"
+echo "  ${TRAINING_DIR}"
+cd "${TRAINING_DIR}"
 
-# --- Main Execution Line ---
-# Replace structure.yaml with the actual path if it's not in the CWD
-# Add any overrides after the yaml path if needed, e.g., python train.py structure.yaml trainer.devices=2 data.batch_size=2
+echo "Activating SweetFold environment:"
+echo "  ${SWEETFOLD_ENV}"
+source activate "${SWEETFOLD_ENV}"
+
+echo "Starting SweetFold training..."
+echo "Using config:"
+echo "  ${TRAINING_DIR}/full.yaml"
+
+# ---------------------------------------------------------------------
+# Main training command
+# ---------------------------------------------------------------------
+
 python train.py full.yaml
 
 echo "Training script finished."
