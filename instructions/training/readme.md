@@ -217,7 +217,7 @@ The most recent checkpoint will usually be:
 
 ## 8. Configure `train.sh`
 
-In `train.sh`, update the training directory:
+In `train.sh`, update the training directory: 
 
 ```bash
 TRAINING_DIR="/path/to/sweetfold_training"
