@@ -2,7 +2,7 @@
 
 These instructions explain how to set up the SweetFold/Boltz environment and run the glycan dataset processing pipeline from raw PDB discovery to final validation-set creation.
 
-The scripts are written as standalone Python scripts. Some can run on a normal local Python environment, while others require the SweetFold/Boltz environment because they import `boltz`, `rdkit`, and related dependencies.
+The scripts are written as standalone Python scripts. Some scripts can run in a normal Python environment, while others require the SweetFold/Boltz environment because they import `boltz`, `rdkit`, and related dependencies.
 
 ---
 
@@ -10,13 +10,17 @@ The scripts are written as standalone Python scripts. Some can run on a normal l
 
 The full pipeline is:
 
-1. Find PDB IDs that contain glycans.
-2. Download the matching PDB files.
-3. Clean protein-glycan PDB files.
-4. Separately extract or clean free-floating glycan structures.
-5. Combine the cleaned folders into one dataset folder.
-6. Convert cleaned `.pdb` files into Boltz/SweetFold `.npz` training structures.
-7. Create a validation ID file from the processed `.npz` files.
+1. Create a SweetFold/Boltz Python environment.
+2. Install Boltz version `1.0.0` specifically.
+3. Download the SweetFold-modified `boltz` folder from the SweetFold GitHub repository.
+4. Replace the installed Boltz package folder with the SweetFold-modified `boltz` folder.
+5. Find PDB IDs that contain glycans.
+6. Download the matching PDB files.
+7. Clean protein-glycan PDB files.
+8. Separately extract or clean free-floating glycan structures.
+9. Combine the cleaned folders into one dataset folder.
+10. Convert cleaned `.pdb` files into Boltz/SweetFold `.npz` training structures.
+11. Create a validation ID file from the processed `.npz` files.
 
 ---
 
@@ -27,10 +31,6 @@ Replace these placeholder paths with real paths on your machine or cluster.
 `/path/to/sweetfold_env`
 
 This is the Python or Conda environment where Boltz/SweetFold is installed.
-
-`/path/to/sweetfold_repo`
-
-This is the local folder created after cloning the SweetFold GitHub repository.
 
 `/path/to/project`
 
@@ -44,13 +44,25 @@ This is where the processing scripts are stored.
 
 This is the parent folder for all generated datasets.
 
+`/path/to/project/sweetfold_repo`
+
+This is the local folder created if you clone the full SweetFold GitHub repository.
+
+`/path/to/project/sweetfold_repo/src/boltz`
+
+This is the SweetFold-modified Boltz source-code folder inside the SweetFold GitHub repository.
+
+`/path/to/project/boltz`
+
+This is the local folder path if you manually download only the SweetFold `src/boltz` folder and rename it to `boltz`.
+
 `/path/to/sweetfold_env/weights`
 
 This is where `ccd.pkl` or other required metadata/checkpoint files should be placed if a script requires them.
 
 `/path/to/sweetfold_env/lib/python3.10/site-packages/boltz`
 
-This is the installed `boltz` source-code folder inside the Python environment.
+This is the installed `boltz` source-code folder inside the Python environment. This folder must be replaced with the SweetFold-modified `boltz` folder.
 
 Important: the exact `site-packages` path can vary by Python version and environment type. If you are unsure where `boltz` is installed, activate the environment and run:
 
@@ -82,31 +94,80 @@ RDKit may already be installed by Boltz. If RDKit is missing, install it with Co
 
 ---
 
-## 4. Download the SweetFold Code Folder
+## 4. Download the SweetFold `boltz` Folder
 
-Clone the SweetFold repository somewhere on your machine.
+The GitHub repository used here is specifically the SweetFold repository. SweetFold modifies the original Boltz source code, and the modified Boltz package lives inside the SweetFold repo at:
 
-Replace the URL below with the actual SweetFold GitHub repository URL.
+https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+
+You do not need to download the entire repository if you only want the modified Boltz source folder. The important folder in the repository is:
+
+    src/boltz
+
+However, when you place this folder inside your Python environment, it must be named exactly:
+
+    boltz
+
+It should NOT be named:
+
+    src/boltz
+
+In other words, the final installed package path should look like this:
+
+    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+
+not this:
+
+    /path/to/sweetfold_env/lib/python3.10/site-packages/src/boltz
+
+### Option A: Download the Full SweetFold Repository
+
+This is the simplest and least error-prone option.
 
     cd /path/to/project
-    git clone https://github.com/YOUR_USERNAME/YOUR_SWEETFOLD_REPO.git sweetfold_repo
+    git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
 
-After cloning, your local SweetFold folder should look something like this:
+After cloning, the SweetFold-modified Boltz folder will be located at:
 
-    /path/to/project/sweetfold_repo
-    /path/to/project/sweetfold_repo/boltz
+    /path/to/project/sweetfold_repo/src/boltz
 
-The key folder is:
+This is the folder that will replace the installed Boltz package.
 
-    /path/to/project/sweetfold_repo/boltz
+### Option B: Download Only the `src/boltz` Folder
 
-That folder is the SweetFold-modified `boltz/` source folder.
+GitHub does not provide a simple one-click command for downloading only one folder using plain `git clone`.
+
+If you download the folder manually from:
+
+    https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
+
+make sure the downloaded folder is named exactly:
+
+    boltz
+
+If the download gives you a nested folder structure like this:
+
+    src/boltz
+
+then move or rename it so that the final folder you copy is simply:
+
+    boltz
+
+For example, your local folder should become:
+
+    /path/to/project/boltz
+
+or, if you cloned the full repository:
+
+    /path/to/project/sweetfold_repo/src/boltz
+
+Both are fine as long as the actual folder copied into `site-packages` is named `boltz`.
 
 ---
 
 ## 5. Replace the Installed Boltz Folder with the SweetFold Boltz Folder
 
-First, activate the SweetFold environment:
+Before replacing anything, activate the SweetFold environment:
 
     conda activate sweetfold_env
 
@@ -122,13 +183,29 @@ Back up the original installed Boltz folder:
 
     mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
 
-Copy the SweetFold-modified `boltz/` folder into the environment:
+Now copy the SweetFold-modified Boltz folder into the environment.
 
-    cp -r /path/to/project/sweetfold_repo/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+If you cloned the full SweetFold repository, run:
 
-Verify that Python can import the replaced package:
+    cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
 
-    python -c "import boltz; print('Boltz/SweetFold import successful:', boltz.__file__)"
+If you manually downloaded only the SweetFold `boltz` folder, run:
+
+    cp -r /path/to/project/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+
+Important: after copying, the final folder must be:
+
+    /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+
+It must not be:
+
+    /path/to/sweetfold_env/lib/python3.10/site-packages/src/boltz
+
+Verify that Python can import the replaced SweetFold-modified Boltz package:
+
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
+
+The printed path should point to the new `boltz` folder inside your SweetFold environment.
 
 ---
 
@@ -481,15 +558,15 @@ The overall command flow is:
     python -m pip install tqdm httpx scipy numpy pandas biopython
     conda install -c conda-forge rdkit -y
 
-    # Download SweetFold code
+    # Download the full SweetFold repository
     cd /path/to/project
-    git clone https://github.com/YOUR_USERNAME/YOUR_SWEETFOLD_REPO.git sweetfold_repo
+    git clone https://github.com/Keshav-Sundar-4/SweetFold.git sweetfold_repo
 
-    # Replace installed Boltz with SweetFold Boltz
+    # Replace installed Boltz with the SweetFold-modified Boltz folder
     python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
     mv /path/to/sweetfold_env/lib/python3.10/site-packages/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz_original
-    cp -r /path/to/project/sweetfold_repo/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
-    python -c "import boltz; print('Boltz/SweetFold import successful:', boltz.__file__)"
+    cp -r /path/to/project/sweetfold_repo/src/boltz /path/to/sweetfold_env/lib/python3.10/site-packages/boltz
+    python -c "import boltz; print('SweetFold-modified Boltz import successful:', boltz.__file__)"
 
     # Step 1: Get PDB IDs
     cd /path/to/project/scripts
