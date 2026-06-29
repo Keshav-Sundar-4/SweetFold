@@ -1,100 +1,90 @@
 # SweetFold Inference Setup Instructions
 
-SweetFold inference requires four things:
+SweetFold inference requires:
 
-1. Install Boltz v1.0.0.
-2. Download the SweetFold `boltz` folder.
-3. Replace the installed Boltz folder with the SweetFold version.
-4. Download the SweetFold checkpoint and run inference.
+1. Boltz v1.0.0 installed.
+2. The installed Boltz source-code folder replaced with SweetFold’s `boltz` folder.
+3. A `weights` folder containing the SweetFold epoch 23 checkpoint.
+4. An input YAML file.
+5. An inference command or shell script.
 
 ---
 
-## 1. Create a Python Environment
+## 1. Install Boltz v1.0.0
 
-Create and activate a fresh environment:
+Create a fresh Python or Conda environment for SweetFold inference.
 
-    conda create -n sweetfold_env python=3.10 -y
-    conda activate sweetfold_env
-    python -m pip install --upgrade pip
-
-Install Boltz v1.0.0 exactly:
+Inside that environment, install Boltz v1.0.0 exactly:
 
     pip install "boltz[cuda]==1.0.0"
+
+Use this exact version.
 
 ---
 
 ## 2. Download the SweetFold `boltz` Folder
 
-Go here:
+Download the SweetFold `boltz` folder from GitHub:
 
     https://github.com/Keshav-Sundar-4/SweetFold/tree/main/src/boltz
 
-Download the `boltz` folder.
-
-Put it somewhere convenient, for example:
-
-    /path/to/project/boltz
+This is the SweetFold-modified version of the Boltz source code.
 
 ---
 
 ## 3. Replace the Installed Boltz Folder
 
-Find the Boltz folder that pip installed:
+After installing Boltz v1.0.0, locate the installed `boltz` source-code folder inside your environment.
 
-    python -c "import boltz, pathlib; print(pathlib.Path(boltz.__file__).parent)"
+Replace that installed `boltz` folder with the SweetFold `boltz` folder downloaded from GitHub.
 
-The command will print the folder you need to replace.
+The folder name should remain:
 
-Back it up:
+    boltz
 
-    mv /printed/path/to/boltz /printed/path/to/boltz_original
-
-Copy the SweetFold `boltz` folder into its place:
-
-    cp -r /path/to/project/boltz /printed/path/to/boltz
-
-Verify the replacement worked:
-
-    python -c "import boltz; print(boltz.__file__)"
+This replacement is required because SweetFold inference depends on the SweetFold-modified Boltz source code.
 
 ---
 
 ## 4. Create a Weights Folder
 
-Find your active environment path:
+Create a folder named:
 
-    echo $CONDA_PREFIX
+    weights
 
-Create a weights folder inside it:
+inside the SweetFold environment.
 
-    mkdir -p "$CONDA_PREFIX/weights"
+This folder will store the SweetFold inference checkpoint.
 
 ---
 
-## 5. Download the SweetFold Checkpoint
+## 5. Download the SweetFold Epoch 23 Checkpoint
 
-Open:
+Download the SweetFold epoch 23 checkpoint from Hugging Face:
 
     https://huggingface.co/Keshav-Sundar-4/SweetFold/tree/main
 
-Download the epoch 23 checkpoint.
+Place the checkpoint inside the `weights` folder.
 
-Move it into:
+For example, the environment should contain:
 
-    "$CONDA_PREFIX/weights"
+    sweetfold_env/
+    └── weights/
+        └── boltz1_glycan_epoch_23.ckpt
 
-For example:
-
-    mv /path/to/downloaded/checkpoint.ckpt "$CONDA_PREFIX/weights/"
+Use the exact checkpoint filename expected by your inference script.
 
 ---
 
-## 6. Run Inference
+## 6. Run SweetFold Inference
 
-Update your inference script so the checkpoint path points to the file you just placed in:
+Run SweetFold using your inference command or the provided HPC shell script.
 
-    "$CONDA_PREFIX/weights"
+Before running, make sure the script points to:
 
-Then run your script, for example:
+1. The SweetFold environment.
+2. The SweetFold checkpoint inside the `weights` folder.
+3. The input YAML file.
+4. The desired output directory.
 
-    sbatch run_inference.sh
+An example HPC shell script may be provided alongside the inference files. Update its paths for your system, then run it using your normal HPC workflow.
