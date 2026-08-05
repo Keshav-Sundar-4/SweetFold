@@ -12,6 +12,9 @@ boltz predict example.yaml \
   --sampling_steps 200 \
   --diffusion_samples 10
 
-# Checkpoint refers to the checkpoint that the Boltz is being ran on. 
-#Potentials (physical steering) from Boltz is turned of. This script predicts 10 diffusion samples
-# It runs for 200 diffusion steps
+# The cache refers to the current folder containing the weights
+# The checkpoint refers to the actual weights being used by the model
+# Potentials, which is Boltz's method of physical steering, are turned off. The model cannot predict accurate structures with them on
+# The number of sampling steps is set to 200, which is the default
+# The number of diffusion samples is set to 10, meaning you will get 10 output cif files
+# More info can be found at: https://github.com/jwohlwend/boltz/blob/v1.0.0/docs/prediction.md
