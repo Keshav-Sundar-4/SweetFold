@@ -11,7 +11,7 @@ File Structure:
 SweetFold Benchmarks:
 
 <p align="center">
-  <img src="./assets/Benchmark_Oligo.png" width="32%" alt="Oligosaccharide benchmark">
-  <img src="./assets/Benchmark_Lectin.png" width="32%" alt="Lectin benchmark">
-  <img src="./assets/Benchmark_Glycoprotein.png" width="32%" alt="Glycoprotein benchmark">
+  <img src="./assets/Benchmark_Oligo.png" width="64%" alt="Oligosaccharide benchmark">
+  <img src="./assets/Benchmark_Lectin.png" width="64%" alt="Lectin benchmark">
+  <img src="./assets/Benchmark_Glycoprotein.png" width="64%" alt="Glycoprotein benchmark">
 </p>
